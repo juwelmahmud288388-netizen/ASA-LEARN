@@ -14,6 +14,7 @@ import { LandingPage } from './pages/LandingPage';
 import { LessonPlayerPage } from './pages/LessonPlayerPage';
 import { AboutPage, FeaturesPage, PolicyPage } from './pages/StaticPages';
 import { StudentDashboard } from './pages/StudentDashboard';
+import { Ai3DExplorerPage } from './pages/Ai3DExplorerPage';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -78,6 +79,7 @@ const RouterView: React.FC = () => {
   if (route === '/' || route === '') return <LandingPage />;
   if (route.startsWith('/classes')) return <ClassDirectoryPage />;
   if (route.startsWith('/lesson/')) return <LessonPlayerPage />;
+  if (route.startsWith('/3d-lab')) return <Ai3DExplorerPage />;
   if (route === '/login') return <LoginPage />;
   if (route === '/register') return <RegisterPage />;
   if (route === '/forgot-password') return <ForgotPasswordPage />;

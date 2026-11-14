@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import {
   onAuthStateChanged,
   signInWithCustomToken,
+  signInWithPopup,
   signOut,
   type User as FirebaseUser,
 } from 'firebase/auth';
@@ -20,6 +21,7 @@ import {
 import {
   auth,
   db,
+  googleProvider,
   handleFirestoreError,
   OperationType,
   testFirestoreConnection,
@@ -27,6 +29,8 @@ import {
 import { buildInitialSeedData, DEFAULT_APP_SETTINGS } from '../lib/defaultCurriculum';
 import { createClientId } from '../lib/utils';
 import type {
+  AdminAccount,
+  Ai3DSceneBlueprint,
   AiConversation,
   Announcement,
   AppSettings,
@@ -54,8 +58,10 @@ interface AppContextValue {
   userProfile: UserProfile | null;
   authLoading: boolean;
   isAdmin: boolean;
+  currentAdmin: AdminAccount | null;
   adminSessionActive: boolean;
   hasFirestoreAdminAuth: boolean;
+  firebaseConnected: boolean;
   language: Language;
   setLanguage: (lang: Language) => Promise<void>;
   showLanguageModal: boolean;
@@ -76,6 +82,9 @@ interface AppContextValue {
   needsAdminSeed: boolean;
   refreshCurriculum: () => Promise<void>;
   seedCurriculumFromAdmin: () => Promise<void>;
+  syncItemToFirestore: (colName: string, id: string, item: Record<string, unknown>) => Promise<void>;
+  deleteItemFromFirestore: (colName: string, id: string) => Promise<void>;
+  syncAdminInviteToFirestore: (admin: AdminAccount) => Promise<void>;
   progressList: StudentProgress[];
   bookmarks: BookmarkItem[];
   notes: StudentNote[];
@@ -88,7 +97,8 @@ interface AppContextValue {
     password: string;
   }) => Promise<{ profile: UserProfile }>;
   unlockStudentProfile: (password: string) => Promise<{ profile: UserProfile }>;
-  loginAdminWithPassword: (password: string) => Promise<void>;
+  loginAdminWithPassword: (password: string, email?: string) => Promise<void>;
+  loginAdminWithGoogle: () => Promise<void>;
   logoutAdmin: () => Promise<void>;
   changeAdminPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -106,6 +116,8 @@ interface AppContextValue {
   aiContextLesson: LessonItem | null;
   aiInitialMode: string | null;
   openAiWithLesson: (lesson: LessonItem | null, initialMode?: string) => void;
+  ai3dBlueprint: Ai3DSceneBlueprint | null;
+  setAi3dBlueprint: (blueprint: Ai3DSceneBlueprint | null) => void;
   route: string;
   navigate: (to: string) => void;
 }
@@ -120,6 +132,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [adminSessionActive, setAdminSessionActive] = useState(false);
+  const [currentAdmin, setCurrentAdmin] = useState<AdminAccount | null>(null);
+  const [firebaseConnected, setFirebaseConnected] = useState(false);
 
   const [language, setLanguageState] = useState<Language>(() => {
     const saved = localStorage.getItem('asa_lang');
@@ -155,6 +169,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const [aiContextLesson, setAiContextLesson] = useState<LessonItem | null>(null);
   const [aiInitialMode, setAiInitialMode] = useState<string | null>(null);
+  const [ai3dBlueprint, setAi3dBlueprint] = useState<Ai3DSceneBlueprint | null>(null);
 
   const navigate = useCallback((to: string) => {
     if (to !== window.location.pathname) {
@@ -194,9 +209,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const hasFirestoreAdminAuth = useMemo(() => {
     if (!firebaseUser) return false;
     if (firebaseUser.email === OWNER_EMAIL && firebaseUser.emailVerified) return true;
+    if (
+      currentAdmin &&
+      currentAdmin.active &&
+      currentAdmin.email &&
+      firebaseUser.email?.toLowerCase() === currentAdmin.email.toLowerCase() &&
+      firebaseUser.emailVerified
+    ) {
+      return true;
+    }
     if (userProfile?.role === 'admin' || userProfile?.role === 'owner') return true;
     return false;
-  }, [firebaseUser, userProfile]);
+  }, [firebaseUser, userProfile, currentAdmin]);
 
   const isAdmin = useMemo(() => {
     return adminSessionActive || hasFirestoreAdminAuth;
@@ -273,14 +297,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fetch('/api/admin/session', { credentials: 'include' })
       .then((r) => r.json())
       .then((data) => {
-        if (data?.authenticated) setAdminSessionActive(true);
+        if (data?.authenticated) {
+          setAdminSessionActive(true);
+          if (data.admin) setCurrentAdmin(data.admin);
+        }
       })
       .catch(() => {});
   }, []);
 
   // Validate Firestore connection without blocking UI
   useEffect(() => {
-    testFirestoreConnection();
+    void testFirestoreConnection().then((res) => {
+      setFirebaseConnected(res.ok);
+    });
   }, []);
 
   // Load Student Cookie Session or Firebase Auth
@@ -416,44 +445,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [hasFirestoreAdminAuth]);
 
+  const stripUndefined = (obj: Record<string, unknown>) => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined) out[k] = v;
+    }
+    return out;
+  };
+
+  const syncItemToFirestore = useCallback(
+    async (colName: string, id: string, item: Record<string, unknown>) => {
+      if (!hasFirestoreAdminAuth) return;
+      try {
+        const payload = stripUndefined(item);
+        if (colName === 'appSettings') {
+          await setDoc(doc(db, 'appSettings', 'global'), { ...payload, settingId: 'global', updatedAt: serverTimestamp() }, { merge: true });
+        } else if (colName === 'resources' || colName === 'announcements') {
+          await setDoc(doc(db, colName, id), { ...payload, createdAt: serverTimestamp() }, { merge: true });
+        } else {
+          await setDoc(doc(db, colName, id), { ...payload, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
+        }
+        setFirebaseConnected(true);
+      } catch {
+        // Fallback already stored via backend /api/admin/content/save
+      }
+    },
+    [hasFirestoreAdminAuth]
+  );
+
+  const deleteItemFromFirestore = useCallback(
+    async (colName: string, id: string) => {
+      if (!hasFirestoreAdminAuth) return;
+      try {
+        await deleteDoc(doc(db, colName, id));
+      } catch {
+        // Non-blocking fallback
+      }
+    },
+    [hasFirestoreAdminAuth]
+  );
+
+  const syncAdminInviteToFirestore = useCallback(
+    async (admin: AdminAccount) => {
+      if (!hasFirestoreAdminAuth || !admin.email) return;
+      const cleanEmail = admin.email.trim().toLowerCase();
+      try {
+        await setDoc(
+          doc(db, 'adminEmails', cleanEmail),
+          {
+            email: cleanEmail,
+            name: admin.name.slice(0, 120),
+            role: admin.role,
+            active: admin.active,
+            createdAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch {
+        // Non-blocking
+      }
+    },
+    [hasFirestoreAdminAuth]
+  );
+
   const seedCurriculumFromAdmin = useCallback(async () => {
-    const seed = buildInitialSeedData();
     const batch = writeBatch(db);
-    batch.set(doc(db, 'appSettings', 'global'), { ...seed.settings, updatedAt: serverTimestamp() }, { merge: true });
-    for (const item of seed.categories) {
-      batch.set(doc(db, 'categories', item.categoryId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    batch.set(doc(db, 'appSettings', 'global'), { ...appSettings, updatedAt: serverTimestamp() }, { merge: true });
+    for (const item of categories) {
+      batch.set(doc(db, 'categories', item.categoryId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.classes) {
-      batch.set(doc(db, 'classes', item.classId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of classes) {
+      batch.set(doc(db, 'classes', item.classId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.subjects) {
-      batch.set(doc(db, 'subjects', item.subjectId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of subjects) {
+      batch.set(doc(db, 'subjects', item.subjectId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.chapters) {
-      batch.set(doc(db, 'chapters', item.chapterId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of chapters) {
+      batch.set(doc(db, 'chapters', item.chapterId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.topics) {
-      batch.set(doc(db, 'topics', item.topicId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of topics) {
+      batch.set(doc(db, 'topics', item.topicId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.lessons) {
-      batch.set(doc(db, 'lessons', item.lessonId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of lessons) {
+      batch.set(doc(db, 'lessons', item.lessonId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.resources) {
-      batch.set(doc(db, 'resources', item.resourceId), { ...item, createdAt: serverTimestamp() });
+    for (const item of resources) {
+      batch.set(doc(db, 'resources', item.resourceId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp() });
     }
-    for (const item of seed.quizzes) {
-      batch.set(doc(db, 'quizzes', item.quizId), { ...item, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    for (const item of quizzes) {
+      batch.set(doc(db, 'quizzes', item.quizId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
     }
-    for (const item of seed.announcements) {
-      batch.set(doc(db, 'announcements', item.announcementId), { ...item, createdAt: serverTimestamp() });
+    for (const item of announcements) {
+      batch.set(doc(db, 'announcements', item.announcementId), { ...stripUndefined(item as unknown as Record<string, unknown>), createdAt: serverTimestamp() });
     }
-    try {
-      await batch.commit();
-    } catch {
-      // Fallback: local curriculum already powers preview cleanly
-    }
+    await batch.commit();
+    setFirebaseConnected(true);
     await refreshCurriculum();
-  }, [refreshCurriculum]);
+  }, [appSettings, categories, classes, subjects, chapters, topics, lessons, resources, quizzes, announcements, refreshCurriculum]);
 
   const setLanguage = useCallback(
     async (lang: Language) => {
@@ -561,12 +649,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { profile: data.profile as UserProfile };
   }, []);
 
-  const loginAdminWithPassword = useCallback(async (password: string) => {
+  const loginAdminWithPassword = useCallback(async (password: string, email?: string) => {
     const res = await fetch('/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, email }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -579,13 +667,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Admin cookie handles authorization cleanly
       }
     }
+    if (data.admin) setCurrentAdmin(data.admin);
+    setAdminSessionActive(true);
+  }, []);
+
+  const loginAdminWithGoogle = useCallback(async () => {
+    const cred = await signInWithPopup(auth, googleProvider);
+    const idToken = await cred.user.getIdToken();
+    const res = await fetch('/api/admin/firebase-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ idToken }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      await signOut(auth);
+      throw new Error(data.error || 'Google Admin verification failed.');
+    }
+    try {
+      await setDoc(
+        doc(db, 'admins', cred.user.uid),
+        {
+          uid: cred.user.uid,
+          email: cred.user.email || '',
+          role: data.admin?.role || 'admin',
+          createdAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      setFirebaseConnected(true);
+    } catch {
+      // Authorized via owner email or adminEmails allowlist
+    }
+    if (data.admin) setCurrentAdmin(data.admin);
     setAdminSessionActive(true);
   }, []);
 
   const logoutAdmin = useCallback(async () => {
     await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' });
     setAdminSessionActive(false);
-    if (firebaseUser?.uid === 'asa_owner_admin' || firebaseUser?.email === OWNER_EMAIL) {
+    setCurrentAdmin(null);
+    if (firebaseUser) {
       await signOut(auth);
     }
     navigate('/');
@@ -890,8 +1013,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     userProfile,
     authLoading,
     isAdmin,
+    currentAdmin,
     adminSessionActive,
     hasFirestoreAdminAuth,
+    firebaseConnected,
     language,
     setLanguage,
     showLanguageModal,
@@ -912,6 +1037,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     needsAdminSeed,
     refreshCurriculum,
     seedCurriculumFromAdmin,
+    syncItemToFirestore,
+    deleteItemFromFirestore,
+    syncAdminInviteToFirestore,
     progressList,
     bookmarks,
     notes,
@@ -920,6 +1048,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createStudentProfile,
     unlockStudentProfile,
     loginAdminWithPassword,
+    loginAdminWithGoogle,
     logoutAdmin,
     changeAdminPassword,
     logout,
@@ -935,6 +1064,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     aiContextLesson,
     aiInitialMode,
     openAiWithLesson,
+    ai3dBlueprint,
+    setAi3dBlueprint,
     route,
     navigate,
   };

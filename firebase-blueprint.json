@@ -12,6 +12,19 @@
       },
       "required": ["uid", "role", "createdAt"]
     },
+    "AdminInvite": {
+      "title": "AdminInvite",
+      "description": "Allowlisted co-admin email authorized to access Firestore admin operations via verified Google Sign-In.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 200 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "owner"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "name", "role", "active", "createdAt"]
+    },
     "UserProfile": {
       "title": "UserProfile",
       "description": "Student or administrator profile (non-PII learning preferences and role).",
@@ -172,7 +185,7 @@
         "durationMinutes": { "type": "integer" },
         "featured": { "type": "boolean" },
         "has3dMode": { "type": "boolean" },
-        "threeDSceneType": { "type": "string", "enum": ["trigonometry_triangle", "newton_orbit", "algebra_geometry", "molecule_atom"] },
+        "threeDSceneType": { "type": "string", "enum": ["trigonometry_triangle", "newton_orbit", "algebra_geometry", "molecule_atom", "ai_custom"] },
         "order": { "type": "integer" },
         "status": { "type": "string", "enum": ["published", "draft"] },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -354,6 +367,10 @@
     "/admins/{uid}": {
       "schema": { "$ref": "#/entities/AdminRecord" },
       "description": "Authorized admin UIDs."
+    },
+    "/adminEmails/{email}": {
+      "schema": { "$ref": "#/entities/AdminInvite" },
+      "description": "Authorized co-admin verified email allowlist."
     },
     "/users/{uid}": {
       "schema": { "$ref": "#/entities/UserProfile" },

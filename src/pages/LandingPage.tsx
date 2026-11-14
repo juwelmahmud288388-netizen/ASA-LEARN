@@ -170,11 +170,11 @@ export const LandingPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => navigate('/lesson/les-sample-3d-demo')}
+                onClick={() => navigate('/3d-lab')}
                 className="inline-flex items-center gap-2 rounded-xl border border-[#172554]/20 bg-white/85 px-5 py-3 text-sm font-semibold text-[#172554] transition hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800/80 dark:text-white dark:hover:bg-slate-800"
               >
                 <Box className="h-4 w-4" />
-                <span>{t(language, 'heroCtaSecondary')}</span>
+                <span>{language === 'bn' ? 'AI ৩ডি ল্যাব' : 'Open AI 3D Lab'}</span>
               </button>
             </div>
           </div>
@@ -183,12 +183,12 @@ export const LandingPage: React.FC = () => {
           <div className="lg:col-span-5">
             <button
               type="button"
-              onClick={() => navigate('/lesson/les-sample-3d-demo')}
+              onClick={() => navigate('/3d-lab')}
               className="group relative block w-full overflow-hidden rounded-2xl border border-[#172554]/10 bg-[#091332] text-left shadow-md"
             >
               <img
                 src="/src/assets/images/hero_learning_workspace_1794668388489.jpg"
-                alt="Interactive Video & 3D Lab Demo"
+                alt="Interactive AI 3D Lab"
                 referrerPolicy="no-referrer"
                 className="h-60 w-full object-cover opacity-80 transition duration-300 group-hover:scale-105"
               />
@@ -196,12 +196,12 @@ export const LandingPage: React.FC = () => {
               <div className="absolute bottom-0 left-0 right-0 p-5 text-white">
                 <span className="inline-flex items-center gap-1.5 rounded-lg bg-[#BFE8FF] px-2.5 py-1 text-[11px] font-bold text-[#172554]">
                   <Box className="h-3.5 w-3.5" />
-                  <span>{language === 'bn' ? 'লাইভ ডেমো + থ্রিডি মোড' : 'Live Demo Video + 3D Lab'}</span>
+                  <span>{language === 'bn' ? 'যেকোনো টপিক ৩ডি-তে বুঝুন' : 'Instant Topic-to-3D + AI Voice'}</span>
                 </span>
                 <p className="font-display mt-2 text-base font-bold">
                   {language === 'bn'
-                    ? 'ত্রিকোণমিতি ও নিউটনের গতিসূত্র থ্রিডি মোডে পরীক্ষা করুন'
-                    : 'Test Interactive Trigonometry & Orbit Mechanics in 3D'}
+                    ? 'বিজ্ঞান ও গণিতের যেকোনো বিষয় ৩ডি মডেলে ও ভয়েসে শিখুন'
+                    : 'Turn Any Science or Math Topic Into a 3D Simulation'}
                 </p>
               </div>
             </button>

@@ -11,7 +11,7 @@ export const Navbar: React.FC = () => {
   const navItems = [
     { label: t(language, 'navHome'), path: '/' },
     { label: t(language, 'navClasses'), path: '/classes' },
-    { label: language === 'bn' ? '৩ডি ডেমো' : '3D Demo', path: '/lesson/les-sample-3d-demo' },
+    { label: language === 'bn' ? 'থ্রিডি ল্যাব' : 'AI 3D Lab', path: '/3d-lab' },
     { label: t(language, 'navFeatures'), path: '/features' },
     ...(isAdmin ? [{ label: t(language, 'navAdmin'), path: '/admin' }] : []),
   ];

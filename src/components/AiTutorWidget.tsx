@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   Box,
@@ -8,10 +8,12 @@ import {
   Copy,
   FileText,
   HelpCircle,
+  Loader2,
   Mic,
   MicOff,
   Send,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   Volume2,
@@ -48,6 +50,8 @@ export const AiTutorWidget: React.FC = () => {
     setAiDrawerOpen,
     aiContextLesson,
     aiInitialMode,
+    setAi3dBlueprint,
+    navigate,
   } = useApp();
 
   const [mode, setMode] = useState<TutorMode>(language === 'bn' ? 'bangla_tutor' : 'general');
@@ -65,9 +69,13 @@ export const AiTutorWidget: React.FC = () => {
   const [pdfFile, setPdfFile] = useState<{ name: string; base64: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Voice Recognition & Speech Synthesis
+  // Voice Recognition & Natural Gemini AI TTS
   const [listening, setListening] = useState(false);
   const [speakingEnabled, setSpeakingEnabled] = useState(true);
+  const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
+  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [building3dId, setBuilding3dId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -90,6 +98,36 @@ export const AiTutorWidget: React.FC = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sending]);
 
+  const stopAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setPlayingAudioId(null);
+  };
+
+  useEffect(() => {
+    if (!aiDrawerOpen) {
+      stopAudio();
+    }
+    return () => stopAudio();
+  }, [aiDrawerOpen]);
+
+  const availableSubjects = useMemo(() => {
+    const classSpecific = subjects.filter((s) => s.classId === selectedClass);
+    const list = classSpecific.length > 0 ? classSpecific : subjects;
+    const seen = new Set<string>();
+    return list.filter((s) => {
+      if (seen.has(s.title)) return false;
+      seen.add(s.title);
+      return true;
+    });
+  }, [subjects, selectedClass]);
+
   if (!appSettings.aiSettings.enabled) return null;
 
   const classObj = classes.find((c) => c.classId === selectedClass);
@@ -110,12 +148,77 @@ export const AiTutorWidget: React.FC = () => {
           'Create a 45-minute practice quiz for this chapter',
         ];
 
-  const speakText = (text: string) => {
-    if (!speakingEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text.replace(/[*#`]/g, '').slice(0, 600));
-    utterance.lang = language === 'bn' ? 'bn-BD' : 'en-US';
-    window.speechSynthesis.speak(utterance);
+  const speakText = async (text: string, msgId = 'auto') => {
+    if (!speakingEnabled) return;
+    if (playingAudioId === msgId) {
+      stopAudio();
+      return;
+    }
+    stopAudio();
+    setLoadingAudioId(msgId);
+    const cleanText = text.replace(/[*#`]/g, '').slice(0, 1200);
+    try {
+      const res = await fetch('/api/ai/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ text: cleanText, language }),
+      });
+      const data = await res.json();
+      if (res.ok && data.audioBase64) {
+        const mime = data.mimeType || 'audio/wav';
+        const audio = new Audio(`data:${mime};base64,${data.audioBase64}`);
+        audioRef.current = audio;
+        audio.onended = () => setPlayingAudioId(null);
+        audio.onerror = () => setPlayingAudioId(null);
+        setPlayingAudioId(msgId);
+        await audio.play();
+        return;
+      }
+      throw new Error(data.error || 'TTS failed');
+    } catch {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(cleanText.slice(0, 600));
+        utterance.lang = language === 'bn' ? 'bn-BD' : 'en-US';
+        utterance.onend = () => setPlayingAudioId(null);
+        utterance.onerror = () => setPlayingAudioId(null);
+        setPlayingAudioId(msgId);
+        window.speechSynthesis.speak(utterance);
+      }
+    } finally {
+      setLoadingAudioId(null);
+    }
+  };
+
+  const launchTopicIn3D = async (topicText: string, msgId: string) => {
+    setBuilding3dId(msgId);
+    setError(null);
+    try {
+      const idToken = firebaseUser ? await firebaseUser.getIdToken() : null;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+
+      const res = await fetch('/api/ai/topic-3d', {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({
+          topic: topicText.slice(0, 160),
+          classTitle: classLabel,
+          subjectTitle: selectedSubject,
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.blueprint) throw new Error(data.error || '3D generation failed');
+      setAi3dBlueprint(data.blueprint);
+      setAiDrawerOpen(false);
+      navigate('/3d-lab');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not build 3D model.');
+    } finally {
+      setBuilding3dId(null);
+    }
   };
 
   const toggleVoiceInput = () => {
@@ -318,7 +421,9 @@ export const AiTutorWidget: React.FC = () => {
         };
         const updated = [...nextWithUser, botMsg];
         setMessages(updated);
-        if (activeMode === 'voice_tutor') speakText(data.reply);
+        if (activeMode === 'voice_tutor') {
+          void speakText(data.reply, botMsg.id);
+        }
         await persistConversation(updated);
       }
     } catch (err) {
@@ -329,6 +434,7 @@ export const AiTutorWidget: React.FC = () => {
   };
 
   const clearChat = () => {
+    stopAudio();
     setMessages([]);
     setConvId(createClientId('conv'));
     setPdfFile(null);
@@ -353,7 +459,7 @@ export const AiTutorWidget: React.FC = () => {
 
   return (
     <>
-      {/* Floating AI Assistant Trigger — above MobileBottomNav on mobile */}
+      {/* Floating AI Assistant Trigger */}
       {!aiDrawerOpen && (
         <button
           type="button"
@@ -390,8 +496,11 @@ export const AiTutorWidget: React.FC = () => {
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setSpeakingEnabled(!speakingEnabled)}
-                  title={speakingEnabled ? 'Voice output on' : 'Voice output muted'}
+                  onClick={() => {
+                    if (speakingEnabled) stopAudio();
+                    setSpeakingEnabled(!speakingEnabled);
+                  }}
+                  title={speakingEnabled ? 'AI Voice enabled' : 'AI Voice muted'}
                   className={`rounded-lg p-2 text-xs transition ${
                     speakingEnabled
                       ? 'bg-[#E7F5FF] text-[#172554] dark:bg-slate-800 dark:text-[#BFE8FF]'
@@ -440,12 +549,12 @@ export const AiTutorWidget: React.FC = () => {
                   aria-label="Select subject context"
                   className="rounded-xl border border-[#172554]/15 bg-white/85 px-3 py-1.5 text-xs font-medium text-[#172033] dark:border-white/15 dark:bg-slate-800 dark:text-white"
                 >
-                  <option value="Mathematics">{language === 'bn' ? 'গণিত' : 'Mathematics'}</option>
-                  <option value="Science">{language === 'bn' ? 'বিজ্ঞান' : 'Science'}</option>
-                  <option value="Bangla">{language === 'bn' ? 'বাংলা' : 'Bangla'}</option>
-                  <option value="English">{language === 'bn' ? 'ইংরেজি' : 'English'}</option>
-                  <option value="ICT">{language === 'bn' ? 'আইসিটি' : 'ICT'}</option>
-                  <option value="Bangladesh & Global Studies">{language === 'bn' ? 'বাংলাদেশ ও বিশ্বপরিচয়' : 'BGS'}</option>
+                  {availableSubjects.map((s) => (
+                    <option key={s.subjectId} value={s.title}>
+                      {language === 'bn' ? s.titleBn : s.title}
+                    </option>
+                  ))}
+                  {availableSubjects.length === 0 && <option value="Mathematics">Mathematics</option>}
                 </select>
               </div>
 
@@ -469,7 +578,7 @@ export const AiTutorWidget: React.FC = () => {
             </div>
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+            <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
               {messages.length === 0 && (
                 <div className="space-y-4 py-4">
                   <div className="glass-surface rounded-2xl p-4 text-sm text-[#172033] dark:text-slate-200">
@@ -480,9 +589,20 @@ export const AiTutorWidget: React.FC = () => {
                     </p>
                     <p className="mt-1 text-xs leading-relaxed text-[#64748B] dark:text-slate-400">
                       {language === 'bn'
-                        ? 'যেকোনো অধ্যায়ের প্রশ্ন করুন, গণিতের সমাধান বুঝুন, পিডিএফ আপলোড করুন অথবা থ্রিডি (3D) মডেল সম্পর্কে জানুন।'
-                        : 'Ask curriculum questions, explore 3D simulations, solve math step-by-step, generate quizzes, or upload PDFs.'}
+                        ? 'যেকোনো টপিক লিখুন, পিডিএফ আপলোড করুন, এআই ভয়েসে শুনুন অথবা ৩ডি ল্যাবে লাইভ মডেল দেখুন।'
+                        : 'Ask any question, listen with natural AI voice, upload textbook PDFs, or launch an interactive 3D visualization.'}
                     </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiDrawerOpen(false);
+                        navigate('/3d-lab');
+                      }}
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-[#E7F5FF] px-3 py-1.5 text-xs font-bold text-[#172554] hover:bg-[#BFE8FF] dark:bg-slate-800 dark:text-[#BFE8FF]"
+                    >
+                      <Box className="h-3.5 w-3.5" />
+                      <span>{language === 'bn' ? 'AI ৩ডি ল্যাব ওপেন করুন →' : 'Open AI 3D Topic Lab →'}</span>
+                    </button>
                   </div>
 
                   <div className="space-y-2">
@@ -503,48 +623,98 @@ export const AiTutorWidget: React.FC = () => {
                 </div>
               )}
 
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
-                >
+              {messages.map((msg, idx) => {
+                const prevUserText =
+                  idx > 0 && messages[idx - 1]?.role === 'user' ? messages[idx - 1].text : msg.text;
+                return (
                   <div
-                    className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
-                      msg.role === 'user'
-                        ? 'bg-[#172554] text-white dark:bg-[#263B91]'
-                        : 'glass-surface text-[#172033] dark:text-slate-100'
-                    }`}
+                    key={msg.id}
+                    className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
                   >
-                    {msg.attachmentName && (
-                      <div className="mb-1.5 flex items-center gap-1 text-xs opacity-80">
-                        <FileText className="h-3 w-3" />
-                        <span>{msg.attachmentName}</span>
+                    <div
+                      className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
+                        msg.role === 'user'
+                          ? 'bg-[#172554] text-white dark:bg-[#263B91]'
+                          : 'glass-surface text-[#172033] dark:text-slate-100'
+                      }`}
+                    >
+                      {msg.attachmentName && (
+                        <div className="mb-1.5 flex items-center gap-1 text-xs opacity-80">
+                          <FileText className="h-3 w-3" />
+                          <span>{msg.attachmentName}</span>
+                        </div>
+                      )}
+                      {msg.text}
+                    </div>
+                    {msg.role === 'assistant' && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-3 px-1">
+                        <button
+                          type="button"
+                          onClick={() => copyMsg(msg.id, msg.text)}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-[#64748B] hover:text-[#172554] dark:text-slate-400 dark:hover:text-[#BFE8FF]"
+                        >
+                          {copiedId === msg.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                          <span>{copiedId === msg.id ? 'Copied' : 'Copy'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => void speakText(msg.text, msg.id)}
+                          disabled={loadingAudioId === msg.id}
+                          className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
+                            playingAudioId === msg.id
+                              ? 'text-red-600 dark:text-red-400'
+                              : 'text-[#263B91] hover:underline dark:text-[#BFE8FF]'
+                          }`}
+                        >
+                          {loadingAudioId === msg.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : playingAudioId === msg.id ? (
+                            <Square className="h-3 w-3 fill-current" />
+                          ) : (
+                            <Volume2 className="h-3 w-3" />
+                          )}
+                          <span>
+                            {loadingAudioId === msg.id
+                              ? language === 'bn'
+                                ? 'ভয়েস...'
+                                : 'Loading...'
+                              : playingAudioId === msg.id
+                                ? language === 'bn'
+                                  ? 'থামুন'
+                                  : 'Stop'
+                                : language === 'bn'
+                                  ? 'AI ভয়েস'
+                                  : 'AI Voice'}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={building3dId === msg.id}
+                          onClick={() => void launchTopicIn3D(prevUserText, msg.id)}
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:underline dark:text-emerald-300"
+                        >
+                          {building3dId === msg.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Box className="h-3 w-3" />
+                          )}
+                          <span>
+                            {building3dId === msg.id
+                              ? language === 'bn'
+                                ? '৩ডি তৈরি হচ্ছে...'
+                                : 'Building 3D...'
+                              : language === 'bn'
+                                ? '৩ডি-তে দেখুন'
+                                : 'Visualize in 3D'}
+                          </span>
+                        </button>
                       </div>
                     )}
-                    {msg.text}
                   </div>
-                  {msg.role === 'assistant' && (
-                    <div className="mt-1 flex items-center gap-2 px-1">
-                      <button
-                        type="button"
-                        onClick={() => copyMsg(msg.id, msg.text)}
-                        className="inline-flex items-center gap-1 text-[11px] text-[#64748B] hover:text-[#172554] dark:text-slate-400 dark:hover:text-[#BFE8FF]"
-                      >
-                        {copiedId === msg.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                        <span>{copiedId === msg.id ? 'Copied' : 'Copy'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => speakText(msg.text)}
-                        className="inline-flex items-center gap-1 text-[11px] text-[#64748B] hover:text-[#172554] dark:text-slate-400 dark:hover:text-[#BFE8FF]"
-                      >
-                        <Volume2 className="h-3 w-3" />
-                        <span>{language === 'bn' ? 'শুনুন' : 'Speak'}</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
 
               {sending && (
                 <div className="glass-surface max-w-[75%] rounded-2xl px-4 py-3 text-xs text-[#64748B] dark:text-slate-300">
@@ -618,7 +788,7 @@ export const AiTutorWidget: React.FC = () => {
                     }
                   }}
                   placeholder={
-                    language === 'bn' ? 'আপনার প্রশ্ন লিখুন...' : 'Ask a question or paste a math problem...'
+                    language === 'bn' ? 'যেকোনো প্রশ্ন বা টপিক লিখুন...' : 'Ask a question or enter a topic...'
                   }
                   className="h-10 flex-1 rounded-xl border border-[#172554]/15 bg-white/90 px-3.5 text-sm text-[#172033] placeholder:text-[#64748B] focus:border-[#263B91] focus:outline-none dark:border-white/15 dark:bg-slate-800 dark:text-white"
                 />

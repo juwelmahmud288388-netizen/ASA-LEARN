@@ -5,7 +5,51 @@ export type AccountStatus = 'active' | 'suspended';
 export type LessonCategory = string;
 export type DifficultyLevel = 'beginner' | 'intermediate' | 'advanced';
 export type PublishStatus = 'published' | 'draft';
-export type ThreeDSceneType = 'trigonometry_triangle' | 'newton_orbit' | 'algebra_geometry' | 'molecule_atom';
+export type ThreeDSceneType = 'trigonometry_triangle' | 'newton_orbit' | 'algebra_geometry' | 'molecule_atom' | 'ai_custom';
+
+export interface Ai3DObjectSpec {
+  id?: string;
+  label: string;
+  labelBn?: string;
+  kind: 'sphere' | 'box' | 'cylinder' | 'cone' | 'torus' | 'octahedron' | 'ring';
+  color: string;
+  position: [number, number, number];
+  scale: [number, number, number];
+  rotation?: [number, number, number];
+  motion?: 'static' | 'orbit' | 'spin' | 'oscillate' | 'explode';
+  motionSpeed?: number;
+  orbitRadius?: number;
+  metalness?: number;
+  roughness?: number;
+  opacity?: number;
+}
+
+export interface Ai3DSceneBlueprint {
+  topic: string;
+  title: string;
+  titleBn: string;
+  summary: string;
+  summaryBn: string;
+  keyPoints?: string[];
+  sliderLabel: string;
+  sliderLabelBn: string;
+  sliderMin?: number;
+  sliderMax?: number;
+  sliderDefault?: number;
+  backgroundColor?: string;
+  objects: Ai3DObjectSpec[];
+}
+
+export interface AdminAccount {
+  uid: string;
+  name: string;
+  email?: string;
+  role: 'owner' | 'admin';
+  active: boolean;
+  isPrimary?: boolean;
+  createdAt: string;
+  createdBy?: string;
+}
 
 export interface CategoryItem {
   categoryId: string;

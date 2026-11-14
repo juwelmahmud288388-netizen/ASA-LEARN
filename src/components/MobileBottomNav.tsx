@@ -117,15 +117,15 @@ export const MobileBottomNav: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => handleNav('/lesson/les-sample-3d-demo')}
+            onClick={() => handleNav('/3d-lab')}
             className={`flex min-h-[46px] flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-semibold transition ${
-              route.startsWith('/lesson/les-sample-3d-demo')
+              route.startsWith('/3d-lab')
                 ? 'text-[#172554] dark:text-[#BFE8FF]'
                 : 'text-[#64748B] dark:text-slate-400'
             }`}
           >
             <Box className="h-4 w-4" />
-            <span>{language === 'bn' ? '৩ডি ডেমো' : '3D Lab'}</span>
+            <span>{language === 'bn' ? '৩ডি ল্যাব' : '3D Lab'}</span>
           </button>
 
           <button

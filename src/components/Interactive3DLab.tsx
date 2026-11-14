@@ -1,17 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { Bot, Eye, EyeOff, Pause, Play, RotateCcw } from 'lucide-react';
-import type { Language, ThreeDSceneType } from '../types';
+import type { Ai3DObjectSpec, Ai3DSceneBlueprint, Language, ThreeDSceneType } from '../types';
 
 interface Interactive3DLabProps {
   initialScene?: ThreeDSceneType;
+  customBlueprint?: Ai3DSceneBlueprint | null;
   language: Language;
   onAskAi?: () => void;
 }
 
-const SCENE_OPTIONS: Array<{ id: ThreeDSceneType; labelEn: string; labelBn: string }> = [
+const BUILTIN_SCENES: Array<{ id: ThreeDSceneType; labelEn: string; labelBn: string }> = [
   { id: 'trigonometry_triangle', labelEn: 'Trigonometry 3D Triangle', labelBn: 'ত্রিকোণমিতি থ্রিডি ত্রিভুজ' },
   { id: 'newton_orbit', labelEn: 'Newton Gravity & Orbit', labelBn: 'নিউটনের মহাকর্ষ ও কক্ষপথ' },
   { id: 'algebra_geometry', labelEn: 'Algebra (a + b)³ Cube', labelBn: 'বীজগণিত (a + b)³ ঘনক' },
@@ -20,14 +21,20 @@ const SCENE_OPTIONS: Array<{ id: ThreeDSceneType; labelEn: string; labelBn: stri
 
 export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
   initialScene = 'trigonometry_triangle',
+  customBlueprint = null,
   language,
   onAskAi,
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
-  const [sceneType, setSceneType] = useState<ThreeDSceneType>(initialScene);
-  const [paramValue, setParamValue] = useState<number>(initialScene === 'trigonometry_triangle' ? 35 : 55);
+  const [sceneType, setSceneType] = useState<ThreeDSceneType>(
+    customBlueprint ? 'ai_custom' : initialScene
+  );
+  const [paramValue, setParamValue] = useState<number>(
+    customBlueprint?.sliderDefault ?? (initialScene === 'trigonometry_triangle' ? 35 : 55)
+  );
   const [playing, setPlaying] = useState(true);
   const [showHud, setShowHud] = useState(true);
+  const [selectedPart, setSelectedPart] = useState<Ai3DObjectSpec | null>(null);
   const [webglError, setWebglError] = useState<string | null>(null);
 
   const paramRef = useRef(paramValue);
@@ -35,9 +42,16 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
   const resetCamFnRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    setSceneType(initialScene);
-    setParamValue(initialScene === 'trigonometry_triangle' ? 35 : 55);
-  }, [initialScene]);
+    if (customBlueprint) {
+      setSceneType('ai_custom');
+      setParamValue(customBlueprint.sliderDefault ?? 50);
+      setSelectedPart(customBlueprint.objects?.[0] || null);
+    } else {
+      setSceneType(initialScene === 'ai_custom' ? 'trigonometry_triangle' : initialScene);
+      setParamValue(initialScene === 'trigonometry_triangle' ? 35 : 55);
+      setSelectedPart(null);
+    }
+  }, [initialScene, customBlueprint]);
 
   useEffect(() => {
     paramRef.current = paramValue;
@@ -46,6 +60,18 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
   useEffect(() => {
     playingRef.current = playing;
   }, [playing]);
+
+  const sceneOptions = useMemo(() => {
+    if (!customBlueprint) return BUILTIN_SCENES;
+    return [
+      {
+        id: 'ai_custom' as ThreeDSceneType,
+        labelEn: `AI 3D: ${customBlueprint.title}`,
+        labelBn: `এআই ৩ডি: ${customBlueprint.titleBn || customBlueprint.title}`,
+      },
+      ...BUILTIN_SCENES,
+    ];
+  }, [customBlueprint]);
 
   useEffect(() => {
     const container = mountRef.current;
@@ -74,12 +100,16 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 1.08;
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#091332');
+    const bgHex =
+      sceneType === 'ai_custom' && customBlueprint?.backgroundColor
+        ? customBlueprint.backgroundColor
+        : '#091332';
+    scene.background = new THREE.Color(bgHex);
 
     const pmrem = new THREE.PMREMGenerator(renderer);
     const envTarget = pmrem.fromScene(new RoomEnvironment(), 0.04);
@@ -97,12 +127,12 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
     controls.enableDamping = true;
     controls.dampingFactor = 0.07;
     controls.minDistance = 2.5;
-    controls.maxDistance = 14;
-    controls.target.set(0, 0.4, 0);
+    controls.maxDistance = 16;
+    controls.target.set(0, 0.35, 0);
 
     resetCamFnRef.current = () => {
       camera.position.set(4.8, 3.6, 5.8);
-      controls.target.set(0, 0.4, 0);
+      controls.target.set(0, 0.35, 0);
       controls.update();
     };
 
@@ -110,21 +140,20 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
     keyLight.position.set(5, 8, 6);
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight('#BFE8FF', 1.1);
+    const fillLight = new THREE.DirectionalLight('#BFE8FF', 1.15);
     fillLight.position.set(-5, 3, -4);
     scene.add(fillLight);
 
-    const ambientLight = new THREE.AmbientLight('#8fb8ff', 0.45);
+    const ambientLight = new THREE.AmbientLight('#8fb8ff', 0.48);
     scene.add(ambientLight);
 
     const grid = new THREE.GridHelper(10, 20, '#263B91', '#162454');
-    grid.position.y = -0.85;
+    grid.position.y = -1.25;
     scene.add(grid);
 
     const rootGroup = new THREE.Group();
     scene.add(rootGroup);
 
-    // Track disposable geometries & materials
     const geometries: THREE.BufferGeometry[] = [];
     const materials: THREE.Material[] = [];
     const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
@@ -138,7 +167,106 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
 
     let updateSceneFn: (dt: number, elapsed: number, p: number) => void = () => {};
 
-    if (sceneType === 'trigonometry_triangle') {
+    if (sceneType === 'ai_custom' && customBlueprint?.objects?.length) {
+      const createGeometryForSpec = (spec: Ai3DObjectSpec): THREE.BufferGeometry => {
+        switch (spec.kind) {
+          case 'sphere':
+            return trackGeo(new THREE.SphereGeometry(0.5, 28, 28));
+          case 'cylinder':
+            return trackGeo(new THREE.CylinderGeometry(0.45, 0.45, 1, 24));
+          case 'cone':
+            return trackGeo(new THREE.ConeGeometry(0.5, 1, 24));
+          case 'torus':
+            return trackGeo(new THREE.TorusGeometry(0.55, 0.14, 18, 48));
+          case 'octahedron':
+            return trackGeo(new THREE.OctahedronGeometry(0.58, 0));
+          case 'ring':
+            return trackGeo(new THREE.TorusGeometry(0.85, 0.04, 14, 64));
+          case 'box':
+          default:
+            return trackGeo(new THREE.BoxGeometry(1, 1, 1));
+        }
+      };
+
+      const spawned = customBlueprint.objects.map((spec, idx) => {
+        const geo = createGeometryForSpec(spec);
+        const opacity = typeof spec.opacity === 'number' ? THREE.MathUtils.clamp(spec.opacity, 0.15, 1) : 1;
+        const mat = trackMat(
+          new THREE.MeshStandardMaterial({
+            color: spec.color || '#38BDF8',
+            metalness: typeof spec.metalness === 'number' ? spec.metalness : 0.25,
+            roughness: typeof spec.roughness === 'number' ? spec.roughness : 0.3,
+            transparent: opacity < 0.99,
+            opacity,
+          })
+        );
+        const mesh = new THREE.Mesh(geo, mat);
+        const [px = 0, py = 0, pz = 0] = spec.position || [0, 0, 0];
+        const [sx = 1, sy = 1, sz = 1] = spec.scale || [1, 1, 1];
+        const [rx = 0, ry = 0, rz = 0] = spec.rotation || [0, 0, 0];
+
+        mesh.position.set(px, py, pz);
+        mesh.scale.set(
+          THREE.MathUtils.clamp(sx, 0.08, 4),
+          THREE.MathUtils.clamp(sy, 0.08, 4),
+          THREE.MathUtils.clamp(sz, 0.08, 4)
+        );
+        if (spec.kind === 'ring' && !spec.rotation) {
+          mesh.rotation.set(Math.PI / 2, 0, 0);
+        } else {
+          mesh.rotation.set(rx, ry, rz);
+        }
+
+        rootGroup.add(mesh);
+
+        const basePos = new THREE.Vector3(px, py, pz);
+        const radialDir = basePos.lengthSq() > 0.001 ? basePos.clone().normalize() : new THREE.Vector3(idx % 2 === 0 ? 1 : -1, 0.35, 0.2).normalize();
+        const orbitRadius = spec.orbitRadius && spec.orbitRadius > 0 ? spec.orbitRadius : Math.max(Math.hypot(px, pz), 1.4);
+
+        return {
+          spec,
+          mesh,
+          basePos,
+          radialDir,
+          orbitRadius,
+          initialAngle: Math.atan2(pz, px || 0.001) + idx * 0.65,
+          speed: spec.motionSpeed || 1.1,
+        };
+      });
+
+      const minSlider = customBlueprint.sliderMin ?? 0;
+      const maxSlider = customBlueprint.sliderMax ?? 100;
+
+      updateSceneFn = (dt, elapsed, rawP) => {
+        const normP = maxSlider > minSlider ? (rawP - minSlider) / (maxSlider - minSlider) : rawP / 100;
+        const pFactor = THREE.MathUtils.clamp(normP, 0, 1.5);
+
+        spawned.forEach((entry, idx) => {
+          const motion = entry.spec.motion || 'static';
+          if (motion === 'orbit') {
+            const angle = entry.initialAngle + (playingRef.current ? elapsed * entry.speed * (0.6 + pFactor) : pFactor * Math.PI * 2);
+            const r = entry.orbitRadius * (0.65 + pFactor * 0.7);
+            entry.mesh.position.set(Math.cos(angle) * r, entry.basePos.y, Math.sin(angle) * r);
+          } else if (motion === 'spin') {
+            if (playingRef.current) {
+              entry.mesh.rotation.y += dt * entry.speed * (0.6 + pFactor * 1.6);
+              entry.mesh.rotation.x += dt * 0.25 * entry.speed;
+            }
+          } else if (motion === 'oscillate') {
+            const amp = 0.2 + pFactor * 0.55;
+            entry.mesh.position.y = entry.basePos.y + Math.sin(elapsed * entry.speed * 1.8 + idx) * amp;
+          } else if (motion === 'explode') {
+            const offset = pFactor * 1.15;
+            const target = entry.basePos.clone().addScaledVector(entry.radialDir, offset);
+            entry.mesh.position.lerp(target, Math.min(1, dt * 8));
+          }
+        });
+
+        if (playingRef.current) {
+          rootGroup.rotation.y += dt * 0.14;
+        }
+      };
+    } else if (sceneType === 'trigonometry_triangle') {
       const origin = new THREE.Vector3(-1.8, -0.7, 0);
       const hypLen = 3.6;
 
@@ -161,7 +289,7 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
         trackMat(new THREE.MeshStandardMaterial({ color: '#10B981', roughness: 0.3, transparent: true, opacity: 0.7 }))
       );
 
-      let arcMesh = new THREE.Mesh(trackGeo(new THREE.CircleGeometry(0.95, 32, 0, Math.PI / 4)), matArc);
+      const arcMesh = new THREE.Mesh(trackGeo(new THREE.CircleGeometry(0.95, 32, 0, Math.PI / 4)), matArc);
       arcMesh.position.copy(origin);
 
       const fillTriGeo = trackGeo(new THREE.BufferGeometry());
@@ -302,7 +430,6 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
         }
       };
     } else {
-      // Bohr Atom 3D
       const nucleusGroup = new THREE.Group();
       const protonMat = trackMat(new THREE.MeshStandardMaterial({ color: '#F43F5E', roughness: 0.25 }));
       const neutronMat = trackMat(new THREE.MeshStandardMaterial({ color: '#38BDF8', roughness: 0.25 }));
@@ -322,7 +449,7 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
       });
       rootGroup.add(nucleusGroup);
 
-      const shells: Array<{ ring: THREE.Mesh; electron: THREE.Mesh; radius: number; tilt: [number, number]; speed: number }> = [];
+      const shells: Array<{ ring: THREE.Mesh; electron: THREE.Mesh; radius: number; speed: number }> = [];
       const radii = [1.2, 1.9, 2.55];
       const tilts: Array<[number, number]> = [
         [0.35, 0.2],
@@ -343,7 +470,7 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
         );
         shellGroup.add(ring, electron);
         rootGroup.add(shellGroup);
-        shells.push({ ring, electron, radius: r, tilt: tilts[idx], speed: 2.2 - idx * 0.45 });
+        shells.push({ ring, electron, radius: r, speed: 2.2 - idx * 0.45 });
       });
       rootGroup.position.y = 0.25;
 
@@ -392,9 +519,16 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
       pmrem.dispose();
       renderer.dispose();
     };
-  }, [sceneType]);
+  }, [sceneType, customBlueprint]);
 
   const readoutText = (() => {
+    if (sceneType === 'ai_custom' && customBlueprint) {
+      const label = language === 'bn' ? customBlueprint.sliderLabelBn : customBlueprint.sliderLabel;
+      const activeLabel = selectedPart
+        ? ` · ${language === 'bn' ? selectedPart.labelBn || selectedPart.label : selectedPart.label}`
+        : '';
+      return `${language === 'bn' ? customBlueprint.titleBn : customBlueprint.title} | ${label}: ${Math.round(paramValue)}${activeLabel}`;
+    }
     if (sceneType === 'trigonometry_triangle') {
       const deg = Math.round(paramValue);
       const rad = (deg * Math.PI) / 180;
@@ -410,6 +544,9 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
     return `${language === 'bn' ? 'ইলেকট্রন গতি' : 'Orbital Velocity'}: ${(0.4 + (paramValue / 100) * 2).toFixed(1)}x`;
   })();
 
+  const sliderMin = sceneType === 'ai_custom' ? customBlueprint?.sliderMin ?? 0 : sceneType === 'trigonometry_triangle' ? 15 : 0;
+  const sliderMax = sceneType === 'ai_custom' ? customBlueprint?.sliderMax ?? 100 : sceneType === 'trigonometry_triangle' ? 75 : 100;
+
   return (
     <div className="relative h-full w-full overflow-hidden rounded-2xl bg-[#091332]">
       {webglError ? (
@@ -419,11 +556,32 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
       )}
 
       {/* Top Left Status Pill (Solid surface, no backdrop-blur over WebGL) */}
-      <div className="pointer-events-none absolute left-3 top-3 flex items-center gap-2">
-        <div className="pointer-events-auto flex items-center gap-2 rounded-xl border border-white/15 bg-[#091332]/90 px-3 py-1.5 text-[11px] font-semibold text-[#BFE8FF]">
-          <span className="h-2 w-2 rounded-full bg-emerald-400" />
-          <span className="font-mono-nums">{readoutText}</span>
+      <div className="pointer-events-none absolute left-3 top-3 right-32 flex flex-col items-start gap-1.5">
+        <div className="pointer-events-auto flex max-w-full items-center gap-2 rounded-xl border border-white/15 bg-[#091332]/92 px-3 py-1.5 text-[11px] font-semibold text-[#BFE8FF]">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />
+          <span className="truncate font-mono-nums">{readoutText}</span>
         </div>
+
+        {/* AI Scene Part Legend Strip */}
+        {sceneType === 'ai_custom' && customBlueprint?.objects && customBlueprint.objects.length > 0 && (
+          <div className="pointer-events-auto flex max-w-full flex-wrap gap-1.5">
+            {customBlueprint.objects.slice(0, 6).map((obj, idx) => (
+              <button
+                key={`${obj.label}-${idx}`}
+                type="button"
+                onClick={() => setSelectedPart(obj)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[10px] font-semibold transition ${
+                  selectedPart?.label === obj.label
+                    ? 'border-[#BFE8FF] bg-[#172554] text-white'
+                    : 'border-white/15 bg-[#091332]/90 text-slate-200 hover:border-white/40'
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: obj.color || '#38BDF8' }} />
+                <span>{language === 'bn' ? obj.labelBn || obj.label : obj.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Top Right Quick Buttons */}
@@ -473,11 +631,17 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
               onChange={(e) => {
                 const next = e.target.value as ThreeDSceneType;
                 setSceneType(next);
-                setParamValue(next === 'trigonometry_triangle' ? 35 : 55);
+                setParamValue(
+                  next === 'ai_custom'
+                    ? customBlueprint?.sliderDefault ?? 50
+                    : next === 'trigonometry_triangle'
+                      ? 35
+                      : 55
+                );
               }}
-              className="rounded-lg border border-white/15 bg-[#111f4d] px-2.5 py-1.5 text-[11px] font-medium text-white focus:outline-none"
+              className="max-w-[180px] rounded-lg border border-white/15 bg-[#111f4d] px-2.5 py-1.5 text-[11px] font-medium text-white focus:outline-none"
             >
-              {SCENE_OPTIONS.map((opt) => (
+              {sceneOptions.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {language === 'bn' ? opt.labelBn : opt.labelEn}
                 </option>
@@ -485,20 +649,24 @@ export const Interactive3DLab: React.FC<Interactive3DLabProps> = ({
             </select>
           </div>
 
-          <div className="flex min-w-[170px] flex-1 items-center gap-2.5 sm:max-w-xs">
+          <div className="flex min-w-[160px] flex-1 items-center gap-2.5 sm:max-w-xs">
             <span className="whitespace-nowrap text-[11px] text-[#BFE8FF]">
-              {sceneType === 'trigonometry_triangle'
+              {sceneType === 'ai_custom' && customBlueprint
                 ? language === 'bn'
-                  ? 'কোণ θ'
-                  : 'Angle θ'
-                : language === 'bn'
-                  ? 'নিয়ন্ত্রণ'
-                  : 'Control'}
+                  ? customBlueprint.sliderLabelBn
+                  : customBlueprint.sliderLabel
+                : sceneType === 'trigonometry_triangle'
+                  ? language === 'bn'
+                    ? 'কোণ θ'
+                    : 'Angle θ'
+                  : language === 'bn'
+                    ? 'নিয়ন্ত্রণ'
+                    : 'Control'}
             </span>
             <input
               type="range"
-              min={sceneType === 'trigonometry_triangle' ? 15 : 0}
-              max={sceneType === 'trigonometry_triangle' ? 75 : 100}
+              min={sliderMin}
+              max={sliderMax}
               value={paramValue}
               onChange={(e) => setParamValue(Number(e.target.value))}
               className="h-1.5 w-full cursor-pointer accent-[#BFE8FF]"

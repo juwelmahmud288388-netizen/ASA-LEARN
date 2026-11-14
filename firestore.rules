@@ -11,6 +11,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidEmailKey(email) {
+      return email is string && email.size() >= 3 && email.size() <= 200 && email.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -38,7 +42,10 @@ service cloud.firestore {
     function isAdmin() {
       return isSignedIn() && (
         (request.auth.token.email == 'juwelmahmud288388@gmail.com' && request.auth.token.email_verified == true) ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email_verified == true &&
+         exists(/databases/$(database)/documents/adminEmails/$(request.auth.token.email)) &&
+         get(/databases/$(database)/documents/adminEmails/$(request.auth.token.email)).data.active == true)
       );
     }
 
@@ -174,7 +181,7 @@ service cloud.firestore {
         && (!('durationMinutes' in data) || (data.durationMinutes is int && data.durationMinutes >= 0 && data.durationMinutes <= 600))
         && (!('featured' in data) || data.featured is bool)
         && (!('has3dMode' in data) || data.has3dMode is bool)
-        && (!('threeDSceneType' in data) || data.threeDSceneType in ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom'])
+        && (!('threeDSceneType' in data) || data.threeDSceneType in ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom', 'ai_custom'])
         && data.order is int && data.order >= 0 && data.order <= 500
         && data.status in ['published', 'draft']
         && data.createdAt is timestamp
@@ -304,11 +311,40 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'role', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'role', 'createdAt'])
+        && isValidId(data.uid)
+        && (!('email' in data) || isOptionalString(data.email, 200))
+        && data.role in ['admin', 'owner']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAdminInvite(data) {
+      return data.keys().hasAll(['email', 'name', 'role', 'active', 'createdAt'])
+        && data.keys().hasOnly(['email', 'name', 'role', 'active', 'createdAt'])
+        && isValidEmailKey(data.email)
+        && isNonEmptyString(data.name, 120)
+        && data.role in ['admin', 'owner']
+        && data.active is bool
+        && data.createdAt is timestamp;
+    }
+
     // Admins Registry
     match /admins/{uid} {
       allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
       allow list: if isAdmin();
-      allow create, update, delete: if isAdmin() && isValidId(uid);
+      allow create: if isAdmin() && isValidId(uid) && isValidAdminRecord(incoming()) && incoming().uid == uid && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(uid) && isValidAdminRecord(incoming()) && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(uid);
+    }
+
+    match /adminEmails/{email} {
+      allow get: if isValidEmailKey(email) && (isAdmin() || (isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email == email));
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidEmailKey(email) && isValidAdminInvite(incoming()) && incoming().email == email && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidEmailKey(email) && isValidAdminInvite(incoming()) && incoming().email == existing().email && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidEmailKey(email);
     }
 
     // Users Collection

@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -59,6 +59,16 @@ const ai = new GoogleGenAI({
   },
 });
 
+const aiTts = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || '',
+  apiVersion: 'v1beta',
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
+
 // In-memory rate limiter for auth routes & fallback AI quota tracking
 const authRateLimiter = new Map<string, { count: number; resetAt: number }>();
 const memoryAiUsage = new Map<string, number>();
@@ -86,13 +96,21 @@ function hashPhoneKey(phone: string): string {
   return crypto.createHash('sha256').update(normalizePhone(phone)).digest('hex').slice(0, 40);
 }
 
-function signSessionToken(payload: { uid: string; role: string; exp: number }): string {
+function signSessionToken(payload: {
+  uid: string;
+  role: string;
+  name?: string;
+  email?: string;
+  exp: number;
+}): string {
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
   return `${encoded}.${sig}`;
 }
 
-function verifySessionToken(token: string): { uid: string; role: string; exp: number } | null {
+function verifySessionToken(
+  token: string
+): { uid: string; role: string; name?: string; email?: string; exp: number } | null {
   try {
     const [encoded, sig] = token.split('.');
     if (!encoded || !sig) return null;
@@ -124,9 +142,22 @@ interface AuthenticatedRequest extends Request {
   authUser?: {
     uid: string;
     role: string;
+    name?: string;
     email?: string;
     emailVerified?: boolean;
   };
+}
+
+interface StoredAdminUser {
+  uid: string;
+  name: string;
+  email?: string;
+  role: 'owner' | 'admin';
+  passwordHash: string;
+  active: boolean;
+  isPrimary?: boolean;
+  createdAt: string;
+  createdBy?: string;
 }
 
 interface AdminSecretRecord {
@@ -134,6 +165,52 @@ interface AdminSecretRecord {
   failedAttempts: number;
   lockedUntil: string | null;
   updatedAt: string;
+  adminUsers: StoredAdminUser[];
+}
+
+function normalizeAdminUsers(rawUsers: unknown, fallbackHash: string): StoredAdminUser[] {
+  const list: StoredAdminUser[] = Array.isArray(rawUsers)
+    ? rawUsers
+        .filter((u): u is StoredAdminUser => Boolean(u && typeof u === 'object' && typeof (u as StoredAdminUser).uid === 'string'))
+        .map((u) => ({
+          uid: u.uid,
+          name: String(u.name || 'Admin'),
+          email: u.email ? String(u.email).trim().toLowerCase() : undefined,
+          role: u.role === 'owner' ? 'owner' : 'admin',
+          passwordHash: String(u.passwordHash || fallbackHash),
+          active: u.active !== false,
+          isPrimary: Boolean(u.isPrimary || u.uid === 'asa_owner_admin'),
+          createdAt: String(u.createdAt || new Date().toISOString()),
+          createdBy: u.createdBy,
+        }))
+    : [];
+
+  if (!list.some((u) => u.uid === 'asa_owner_admin')) {
+    list.unshift({
+      uid: 'asa_owner_admin',
+      name: 'Primary Owner',
+      email: OWNER_EMAIL,
+      role: 'owner',
+      passwordHash: fallbackHash,
+      active: true,
+      isPrimary: true,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  return list;
+}
+
+function sanitizeAdminUser(u: StoredAdminUser) {
+  return {
+    uid: u.uid,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    active: u.active,
+    isPrimary: Boolean(u.isPrimary),
+    createdAt: u.createdAt,
+    createdBy: u.createdBy,
+  };
 }
 
 async function loadAdminSecret(): Promise<AdminSecretRecord | null> {
@@ -146,6 +223,7 @@ async function loadAdminSecret(): Promise<AdminSecretRecord | null> {
           failedAttempts: Number(raw.failedAttempts || 0),
           lockedUntil: typeof raw.lockedUntil === 'string' ? raw.lockedUntil : null,
           updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
+          adminUsers: normalizeAdminUsers(raw.adminUsers, raw.passwordHash),
         };
       }
     }
@@ -163,6 +241,7 @@ async function loadAdminSecret(): Promise<AdminSecretRecord | null> {
           failedAttempts: Number(data.failedAttempts || 0),
           lockedUntil: typeof data.lockedUntil === 'string' ? data.lockedUntil : null,
           updatedAt: new Date().toISOString(),
+          adminUsers: normalizeAdminUsers(data.adminUsers, data.passwordHash),
         };
         try {
           fs.writeFileSync(ADMIN_SECRET_FILE, JSON.stringify(record, null, 2), { mode: 0o600 });
@@ -205,6 +284,7 @@ async function ensureAdminPasswordInitialized(): Promise<AdminSecretRecord> {
     failedAttempts: 0,
     lockedUntil: null,
     updatedAt: new Date().toISOString(),
+    adminUsers: normalizeAdminUsers([], passwordHash),
   };
   await saveAdminSecret(initial);
   return initial;
@@ -216,7 +296,7 @@ function resolveAdminCookie(req: Request): AuthenticatedRequest['authUser'] | nu
   if (!adminToken) return null;
   const parsed = verifySessionToken(adminToken);
   if (parsed && (parsed.role === 'owner' || parsed.role === 'admin')) {
-    return { uid: parsed.uid, role: parsed.role };
+    return { uid: parsed.uid, role: parsed.role, name: parsed.name, email: parsed.email };
   }
   return null;
 }
@@ -931,29 +1011,49 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // Admin Portal Standalone Password Authentication (Separate from Student Auth)
+  // Admin Portal Multi-Admin & Google/Password Authentication (Separate from Student Auth)
   app.get('/api/admin/session', async (req: Request, res: Response) => {
     const cookieAdmin = resolveAdminCookie(req);
     if (cookieAdmin) {
-      res.json({ authenticated: true });
+      res.json({
+        authenticated: true,
+        admin: {
+          uid: cookieAdmin.uid,
+          name: cookieAdmin.name || 'Administrator',
+          email: cookieAdmin.email,
+          role: cookieAdmin.role === 'owner' ? 'owner' : 'admin',
+          active: true,
+        },
+      });
       return;
     }
     const user = await resolveAuthUser(req);
     const isFirebaseAdmin =
       Boolean(user) &&
       ((user?.email === OWNER_EMAIL && user?.emailVerified === true) || user?.role === 'admin' || user?.role === 'owner');
-    res.json({ authenticated: isFirebaseAdmin });
+    res.json({
+      authenticated: isFirebaseAdmin,
+      admin: isFirebaseAdmin && user
+        ? {
+            uid: user.uid,
+            name: user.email || 'Firebase Admin',
+            email: user.email,
+            role: user.email === OWNER_EMAIL ? 'owner' : 'admin',
+            active: true,
+          }
+        : null,
+    });
   });
 
   app.post('/api/admin/login', async (req: Request, res: Response) => {
     const ip = req.ip || 'unknown';
-    if (!checkRateLimit(`admin-login:${ip}`, 15, 60_000)) {
+    if (!checkRateLimit(`admin-login:${ip}`, 20, 60_000)) {
       res.status(429).json({ error: 'Too many admin login attempts. Please wait a minute.' });
       return;
     }
 
     try {
-      const { password } = req.body || {};
+      const { password, email } = req.body || {};
       if (!password || typeof password !== 'string') {
         res.status(400).json({ error: 'Admin Portal password is required.' });
         return;
@@ -967,13 +1067,30 @@ async function startServer() {
         return;
       }
 
-      const valid = await bcrypt.compare(password, secret.passwordHash);
-      if (!valid) {
+      const activeAdmins = secret.adminUsers.filter((u) => u.active);
+      let matchedAdmin: StoredAdminUser | null = null;
+
+      if (email && typeof email === 'string' && email.trim()) {
+        const targetEmail = email.trim().toLowerCase();
+        const candidate = activeAdmins.find((u) => u.email?.toLowerCase() === targetEmail);
+        if (candidate && (await bcrypt.compare(password, candidate.passwordHash))) {
+          matchedAdmin = candidate;
+        }
+      } else {
+        for (const candidate of activeAdmins) {
+          if (await bcrypt.compare(password, candidate.passwordHash)) {
+            matchedAdmin = candidate;
+            break;
+          }
+        }
+      }
+
+      if (!matchedAdmin) {
         const nextAttempts = secret.failedAttempts + 1;
-        const lockedUntil = nextAttempts >= 5 ? new Date(Date.now() + 5 * 60 * 1000).toISOString() : null;
+        const lockedUntil = nextAttempts >= 6 ? new Date(Date.now() + 5 * 60 * 1000).toISOString() : null;
         await saveAdminSecret({
           ...secret,
-          failedAttempts: nextAttempts >= 5 ? 0 : nextAttempts,
+          failedAttempts: nextAttempts >= 6 ? 0 : nextAttempts,
           lockedUntil,
           updatedAt: new Date().toISOString(),
         });
@@ -992,8 +1109,10 @@ async function startServer() {
 
       const maxAge = 7 * 24 * 60 * 60 * 1000;
       const adminToken = signSessionToken({
-        uid: 'asa_owner_admin',
-        role: 'owner',
+        uid: matchedAdmin.uid,
+        role: matchedAdmin.role,
+        name: matchedAdmin.name,
+        email: matchedAdmin.email,
         exp: Date.now() + maxAge,
       });
 
@@ -1006,23 +1125,216 @@ async function startServer() {
 
       let customToken: string | null = null;
       try {
-        await adminDb.collection('admins').doc('asa_owner_admin').set(
+        await adminDb.collection('admins').doc(matchedAdmin.uid).set(
           {
-            uid: 'asa_owner_admin',
-            email: OWNER_EMAIL,
-            role: 'owner',
-            updatedAt: FieldValue.serverTimestamp(),
+            uid: matchedAdmin.uid,
+            email: matchedAdmin.email || OWNER_EMAIL,
+            role: matchedAdmin.role,
+            createdAt: FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
-        customToken = await adminAuth.createCustomToken('asa_owner_admin', { role: 'owner' });
+        customToken = await adminAuth.createCustomToken(matchedAdmin.uid, { role: matchedAdmin.role });
       } catch {
         customToken = null;
       }
 
-      res.json({ authenticated: true, customToken });
+      res.json({ authenticated: true, admin: sanitizeAdminUser(matchedAdmin), customToken });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Admin login failed.' });
+    }
+  });
+
+  app.post('/api/admin/firebase-login', async (req: Request, res: Response) => {
+    try {
+      const { idToken } = req.body || {};
+      if (!idToken || typeof idToken !== 'string') {
+        res.status(400).json({ error: 'Google ID token is required.' });
+        return;
+      }
+      const decoded = await adminAuth.verifyIdToken(idToken);
+      const email = decoded.email?.trim().toLowerCase() || '';
+      if (!decoded.email_verified || !email) {
+        res.status(403).json({ error: 'A verified Google email is required.' });
+        return;
+      }
+
+      const secret = await ensureAdminPasswordInitialized();
+      const matched = secret.adminUsers.find((u) => u.active && u.email?.toLowerCase() === email);
+      const isPrimaryOwner = email === OWNER_EMAIL;
+
+      if (!isPrimaryOwner && !matched) {
+        res.status(403).json({
+          error: `Google account (${email}) is not registered as an admin. Ask an existing admin to grant access first.`,
+        });
+        return;
+      }
+
+      const adminInfo = matched || {
+        uid: decoded.uid,
+        name: decoded.name || 'Primary Owner',
+        email,
+        role: 'owner' as const,
+        passwordHash: secret.passwordHash,
+        active: true,
+        isPrimary: true,
+        createdAt: new Date().toISOString(),
+      };
+
+      const maxAge = 7 * 24 * 60 * 60 * 1000;
+      const adminToken = signSessionToken({
+        uid: adminInfo.uid,
+        role: adminInfo.role,
+        name: adminInfo.name,
+        email,
+        exp: Date.now() + maxAge,
+      });
+
+      res.cookie(ADMIN_COOKIE_NAME, adminToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge,
+      });
+
+      res.json({ authenticated: true, admin: sanitizeAdminUser(adminInfo) });
+    } catch (err) {
+      res.status(401).json({ error: err instanceof Error ? err.message : 'Could not verify Google Admin login.' });
+    }
+  });
+
+  app.get('/api/admin/admins', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+    const secret = await ensureAdminPasswordInitialized();
+    res.json({ admins: secret.adminUsers.map(sanitizeAdminUser) });
+  });
+
+  app.post('/api/admin/admins', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { name, password, email, role } = req.body || {};
+      const cleanName = String(name || '').trim();
+      const cleanPass = String(password || '').trim();
+      const cleanEmail = email ? String(email).trim().toLowerCase() : undefined;
+      if (!cleanName || cleanName.length < 2) {
+        res.status(400).json({ error: 'Admin name (min 2 characters) is required.' });
+        return;
+      }
+      if (!cleanPass || cleanPass.length < 6) {
+        res.status(400).json({ error: 'Admin password must be at least 6 characters long.' });
+        return;
+      }
+
+      const secret = await ensureAdminPasswordInitialized();
+      if (cleanEmail && secret.adminUsers.some((u) => u.email?.toLowerCase() === cleanEmail)) {
+        res.status(409).json({ error: 'An admin with this email already exists.' });
+        return;
+      }
+
+      for (const existing of secret.adminUsers) {
+        if (await bcrypt.compare(cleanPass, existing.passwordHash)) {
+          res.status(409).json({ error: 'Choose a distinct password for each admin so they log into their own admin account.' });
+          return;
+        }
+      }
+
+      const newAdmin: StoredAdminUser = {
+        uid: `adm_${crypto.randomBytes(6).toString('hex')}`,
+        name: cleanName.slice(0, 120),
+        email: cleanEmail,
+        role: role === 'owner' ? 'owner' : 'admin',
+        passwordHash: await bcrypt.hash(cleanPass, 12),
+        active: true,
+        isPrimary: false,
+        createdAt: new Date().toISOString(),
+        createdBy: req.authUser?.name || req.authUser?.uid || 'Owner',
+      };
+
+      secret.adminUsers.push(newAdmin);
+      secret.updatedAt = new Date().toISOString();
+      await saveAdminSecret(secret);
+
+      if (cleanEmail) {
+        try {
+          await adminDb.collection('adminEmails').doc(cleanEmail).set({
+            email: cleanEmail,
+            name: newAdmin.name,
+            role: newAdmin.role,
+            active: true,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+        } catch {
+          // Best-effort Firestore mirror
+        }
+      }
+
+      res.status(201).json({ admin: sanitizeAdminUser(newAdmin), admins: secret.adminUsers.map(sanitizeAdminUser) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Could not add co-admin.' });
+    }
+  });
+
+  app.patch('/api/admin/admins/:uid', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { uid } = req.params;
+      const { active, role, newPassword, name, email } = req.body || {};
+      const secret = await ensureAdminPasswordInitialized();
+      const target = secret.adminUsers.find((u) => u.uid === uid);
+      if (!target) {
+        res.status(404).json({ error: 'Admin account not found.' });
+        return;
+      }
+
+      if (typeof active === 'boolean') {
+        if (target.isPrimary && !active) {
+          res.status(400).json({ error: 'Primary Owner account cannot be deactivated.' });
+          return;
+        }
+        target.active = active;
+      }
+      if (role === 'owner' || role === 'admin') {
+        if (!target.isPrimary) target.role = role;
+      }
+      if (typeof name === 'string' && name.trim().length >= 2) target.name = name.trim().slice(0, 120);
+      if (typeof email === 'string') target.email = email.trim().toLowerCase() || undefined;
+      if (typeof newPassword === 'string' && newPassword.trim().length >= 6) {
+        target.passwordHash = await bcrypt.hash(newPassword.trim(), 12);
+        if (target.isPrimary) secret.passwordHash = target.passwordHash;
+      }
+
+      secret.updatedAt = new Date().toISOString();
+      await saveAdminSecret(secret);
+      res.json({ admin: sanitizeAdminUser(target), admins: secret.adminUsers.map(sanitizeAdminUser) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Could not update admin account.' });
+    }
+  });
+
+  app.delete('/api/admin/admins/:uid', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { uid } = req.params;
+      const secret = await ensureAdminPasswordInitialized();
+      const target = secret.adminUsers.find((u) => u.uid === uid);
+      if (!target) {
+        res.status(404).json({ error: 'Admin account not found.' });
+        return;
+      }
+      if (target.isPrimary) {
+        res.status(400).json({ error: 'Primary Owner account cannot be deleted.' });
+        return;
+      }
+      secret.adminUsers = secret.adminUsers.filter((u) => u.uid !== uid);
+      secret.updatedAt = new Date().toISOString();
+      await saveAdminSecret(secret);
+
+      if (target.email) {
+        try {
+          await adminDb.collection('adminEmails').doc(target.email).delete();
+        } catch {
+          // Best-effort Firestore cleanup
+        }
+      }
+      res.json({ ok: true, admins: secret.adminUsers.map(sanitizeAdminUser) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Could not delete co-admin.' });
     }
   });
 
@@ -1038,25 +1350,34 @@ async function startServer() {
         res.status(400).json({ error: 'Current password and new password are required.' });
         return;
       }
-      if (String(newPassword).length < 8) {
-        res.status(400).json({ error: 'New Admin Portal password must be at least 8 characters long.' });
+      if (String(newPassword).length < 6) {
+        res.status(400).json({ error: 'New Admin Portal password must be at least 6 characters long.' });
         return;
       }
 
       const secret = await ensureAdminPasswordInitialized();
-      const valid = await bcrypt.compare(String(currentPassword), secret.passwordHash);
+      const caller =
+        secret.adminUsers.find((u) => u.uid === req.authUser?.uid) ||
+        secret.adminUsers.find((u) => u.isPrimary) ||
+        secret.adminUsers[0];
+      const hashToCheck = caller?.passwordHash || secret.passwordHash;
+      const valid = await bcrypt.compare(String(currentPassword), hashToCheck);
       if (!valid) {
         res.status(401).json({ error: 'Current password is incorrect.' });
         return;
       }
 
       const nextHash = await bcrypt.hash(String(newPassword), 12);
-      await saveAdminSecret({
-        passwordHash: nextHash,
-        failedAttempts: 0,
-        lockedUntil: null,
-        updatedAt: new Date().toISOString(),
-      });
+      if (caller) {
+        caller.passwordHash = nextHash;
+      }
+      if (!caller || caller.isPrimary) {
+        secret.passwordHash = nextHash;
+      }
+      secret.failedAttempts = 0;
+      secret.lockedUntil = null;
+      secret.updatedAt = new Date().toISOString();
+      await saveAdminSecret(secret);
 
       res.json({ ok: true, message: 'Admin Portal password updated successfully.' });
     } catch (err) {
@@ -1383,6 +1704,157 @@ async function startServer() {
 
       const plan = JSON.parse((response.text ?? '[]').trim());
       res.json({ plan });
+    } catch (err) {
+      const parsed = extractRetryError(err);
+      res.status(parsed.status).json({ error: parsed.message });
+    }
+  });
+
+  // AI Topic-to-3D Interactive Scene Generator
+  app.post('/api/ai/topic-3d', async (req: Request, res: Response) => {
+    try {
+      if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+        res.status(503).json({ error: 'GEMINI_API_KEY is not configured in server secrets.' });
+        return;
+      }
+
+      const { topic, language = 'en', classTitle = 'Class 9', subjectTitle = 'Science' } = req.body || {};
+      const cleanTopic = String(topic || '').trim();
+      if (cleanTopic.length < 2) {
+        res.status(400).json({ error: 'Please provide a topic name to visualize in 3D.' });
+        return;
+      }
+
+      const response = await generateWithRetry('gemini-4-hydrogen', {
+        contents: `You are an interactive 3D Educational Visualizer for Bangladeshi school students (${classTitle}, ${subjectTitle}).
+A student chose the topic: "${cleanTopic}".
+Design an informative, visually distinct 3D scene using Three.js primitive shapes so the student understands this concept interactively on screen, plus clear bilingual English and natural Unicode Bangla explanations.
+Constraints for "objects":
+- Provide 5 to 10 geometric objects forming a recognizable scientific/mathematical diagram of "${cleanTopic}".
+- Use kinds only from ['sphere', 'box', 'cylinder', 'cone', 'torus', 'octahedron', 'ring'].
+- Keep positions within x: [-2.8, 2.8], y: [-1.2, 2.2], z: [-2.8, 2.8] and scales between 0.15 and 2.5.
+- Choose rich, contrasting hex colors (#38BDF8, #F472B6, #FACC15, #10B981, #A78BFA, #FB7185, #FFFFFF).
+- Assign realistic motion from ['static', 'orbit', 'spin', 'oscillate', 'explode'].
+- Provide a meaningful interactive slider (sliderLabel, sliderLabelBn, sliderMin: 0, sliderMax: 100, sliderDefault: 50).`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              topic: { type: Type.STRING },
+              title: { type: Type.STRING },
+              titleBn: { type: Type.STRING },
+              summary: { type: Type.STRING },
+              summaryBn: { type: Type.STRING },
+              keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+              sliderLabel: { type: Type.STRING },
+              sliderLabelBn: { type: Type.STRING },
+              sliderMin: { type: Type.INTEGER },
+              sliderMax: { type: Type.INTEGER },
+              sliderDefault: { type: Type.INTEGER },
+              objects: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    labelBn: { type: Type.STRING },
+                    kind: { type: Type.STRING },
+                    color: { type: Type.STRING },
+                    position: { type: Type.ARRAY, items: { type: Type.NUMBER } },
+                    scale: { type: Type.ARRAY, items: { type: Type.NUMBER } },
+                    rotation: { type: Type.ARRAY, items: { type: Type.NUMBER } },
+                    motion: { type: Type.STRING },
+                    motionSpeed: { type: Type.NUMBER },
+                    orbitRadius: { type: Type.NUMBER },
+                    opacity: { type: Type.NUMBER },
+                  },
+                  required: ['label', 'labelBn', 'kind', 'color', 'position', 'scale', 'motion'],
+                },
+              },
+            },
+            required: ['topic', 'title', 'titleBn', 'summary', 'summaryBn', 'keyPoints', 'sliderLabel', 'sliderLabelBn', 'objects'],
+          },
+        },
+      });
+
+      const blueprint = JSON.parse((response.text ?? '{}').trim());
+      blueprint.topic = cleanTopic;
+      if (!Array.isArray(blueprint.objects) || blueprint.objects.length === 0) {
+        throw new Error('Could not generate 3D objects for this topic.');
+      }
+      res.json({ blueprint, preferredLanguage: language });
+    } catch (err) {
+      const parsed = extractRetryError(err);
+      res.status(parsed.status).json({ error: parsed.message });
+    }
+  });
+
+  // Natural AI Voice Synthesis (Gemini 3.8 Flash Lite TTS -> 24kHz WAV)
+  app.post('/api/ai/tts', async (req: Request, res: Response) => {
+    try {
+      if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+        res.status(503).json({ error: 'GEMINI_API_KEY is not configured.' });
+        return;
+      }
+
+      const { text, language = 'en', voiceName } = req.body || {};
+      const cleanedText = String(text || '')
+        .replace(/[*#`_~>]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 750);
+
+      if (!cleanedText) {
+        res.status(400).json({ error: 'Text is required for speech generation.' });
+        return;
+      }
+
+      const selectedVoice =
+        typeof voiceName === 'string' && voiceName.trim()
+          ? voiceName.trim()
+          : language === 'bn'
+            ? 'Zephyr'
+            : 'Kore';
+
+      const promptPrefix =
+        language === 'bn'
+          ? `Read the following Bangla educational explanation clearly, warmly, and naturally for a school student:\n${cleanedText}`
+          : `Read the following educational explanation clearly, warmly, and naturally for a school student:\n${cleanedText}`;
+
+      const response = await aiTts.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: promptPrefix,
+                speechMetadata: {
+                  style: 'Warm, clear, encouraging school teacher voice',
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: selectedVoice },
+            },
+          },
+        },
+      });
+
+      const audioBase64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioBase64) {
+        res.status(502).json({ error: 'AI Voice synthesis did not return audio data.' });
+        return;
+      }
+
+      res.json({ audioBase64, mimeType: 'audio/wav', voiceName: selectedVoice });
     } catch (err) {
       const parsed = extractRetryError(err);
       res.status(parsed.status).json({ error: parsed.message });
@@ -1796,7 +2268,21 @@ async function startServer() {
       }
 
       const id = String(item[idField] || `${colName.slice(0, 3)}_${crypto.randomBytes(4).toString('hex')}`);
-      const cleanItem = { ...item, [idField]: id, createdAt: item.createdAt || now, updatedAt: now };
+      const normalizedItem =
+        colName === 'lessons'
+          ? {
+              ...item,
+              chapterId: String(item.chapterId || '').trim() || 'general',
+              topicId: String(item.topicId || '').trim() || 'general',
+              category: String(item.category || '').trim() || 'interactive_3d',
+              youtubeUrl: String(item.youtubeUrl || '').trim() || 'demo://trigonometry-3d',
+              titleBn: String(item.titleBn || '').trim() || String(item.title || ''),
+              difficulty: item.difficulty || 'intermediate',
+              order: Number(item.order || 1),
+              status: item.status || 'published',
+            }
+          : item;
+      const cleanItem = { ...normalizedItem, [idField]: id, createdAt: item.createdAt || now, updatedAt: now };
       if (!overrides.upserts[colName]) overrides.upserts[colName] = {};
       overrides.upserts[colName]![id] = cleanItem;
       if (overrides.deletes[colName]) {
@@ -1805,7 +2291,7 @@ async function startServer() {
       overrides.activityLogs.unshift({
         logId: `log_${Date.now()}`,
         actorId: req.authUser?.uid || 'admin',
-        actorName: 'Admin Portal',
+        actorName: req.authUser?.name || 'Admin Portal',
         action: `SAVED_${colName.toUpperCase()}`,
         target: String(cleanItem.title || id),
         timestamp: now,
@@ -1828,6 +2314,55 @@ async function startServer() {
     }
   });
 
+  app.post('/api/admin/content/clear-demos', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const seed = buildInitialSeedData();
+      const overrides = loadContentOverrides();
+      const demoCollections: Array<{ col: string; idField: string; items: Array<Record<string, unknown>> }> = [
+        { col: 'lessons', idField: 'lessonId', items: seed.lessons as unknown as Array<Record<string, unknown>> },
+        { col: 'chapters', idField: 'chapterId', items: seed.chapters as unknown as Array<Record<string, unknown>> },
+        { col: 'topics', idField: 'topicId', items: seed.topics as unknown as Array<Record<string, unknown>> },
+        { col: 'resources', idField: 'resourceId', items: seed.resources as unknown as Array<Record<string, unknown>> },
+        { col: 'quizzes', idField: 'quizId', items: seed.quizzes as unknown as Array<Record<string, unknown>> },
+        { col: 'announcements', idField: 'announcementId', items: seed.announcements as unknown as Array<Record<string, unknown>> },
+      ];
+
+      let removedCount = 0;
+      for (const entry of demoCollections) {
+        const delSet = new Set(overrides.deletes[entry.col] || []);
+        for (const item of entry.items) {
+          const id = String(item[entry.idField] || '');
+          if (id && !delSet.has(id)) {
+            delSet.add(id);
+            removedCount += 1;
+          }
+          if (overrides.upserts[entry.col]?.[id]) {
+            delete overrides.upserts[entry.col]![id];
+          }
+          try {
+            await adminDb.collection(entry.col).doc(id).delete();
+          } catch {
+            // Best-effort Firestore cleanup
+          }
+        }
+        overrides.deletes[entry.col] = Array.from(delSet);
+      }
+
+      overrides.activityLogs.unshift({
+        logId: `log_${Date.now()}`,
+        actorId: req.authUser?.uid || 'admin',
+        actorName: req.authUser?.name || 'Admin Portal',
+        action: 'CLEARED_DEMO_CONTENT',
+        target: `${removedCount} sample items`,
+        timestamp: new Date().toISOString(),
+      });
+      saveContentOverrides(overrides);
+      res.json({ ok: true, removedCount });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Could not clear demo content.' });
+    }
+  });
+
   app.post('/api/admin/content/delete', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const { collection: colName, id } = req.body || {};
@@ -1842,7 +2377,7 @@ async function startServer() {
       overrides.activityLogs.unshift({
         logId: `log_${Date.now()}`,
         actorId: req.authUser?.uid || 'admin',
-        actorName: 'Admin Portal',
+        actorName: req.authUser?.name || 'Admin Portal',
         action: `DELETED_${String(colName).toUpperCase()}`,
         target: String(id),
         timestamp: new Date().toISOString(),
