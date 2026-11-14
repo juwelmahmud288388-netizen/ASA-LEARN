@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.asa-admin-secret.json
+.asa-student-profiles.json
+.asa-content-override.json
