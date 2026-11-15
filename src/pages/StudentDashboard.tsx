@@ -7,6 +7,7 @@ import {
   Calendar,
   CheckCircle2,
   FileText,
+  Flame,
   Globe,
   LogOut,
   MessageSquare,
@@ -16,16 +17,20 @@ import {
   Printer,
   Search,
   Settings,
+  Sparkles,
   Sun,
   Trash2,
+  Trophy,
 } from 'lucide-react';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { BADGE_CATALOG, getBorderMeta, TROPHY_CATALOG } from '../lib/gamification';
 import { BRAND_LOGO_PATH, createClientId, formatTimestamp } from '../lib/utils';
 import { useApp } from '../context/AppContext';
 import { t } from '../i18n/translations';
+import { TrophyRoom } from '../components/TrophyRoom';
 
-type DashboardTab = 'overview' | 'bookmarks' | 'notes' | 'calendar' | 'notifications' | 'settings';
+type DashboardTab = 'overview' | 'trophies' | 'bookmarks' | 'notes' | 'calendar' | 'notifications' | 'settings';
 
 export const StudentDashboard: React.FC = () => {
   const {
@@ -50,11 +55,18 @@ export const StudentDashboard: React.FC = () => {
     saveNote,
     deleteNote,
     updateUserProfile,
+    dailyCheckIn,
+    openStudentModal,
     logout,
     navigate,
   } = useApp();
 
-  const [tab, setTab] = useState<DashboardTab>('overview');
+  const [tab, setTab] = useState<DashboardTab>(() => {
+    const qTab = new URLSearchParams(window.location.search).get('tab') as DashboardTab | null;
+    const validTabs: DashboardTab[] = ['overview', 'trophies', 'bookmarks', 'notes', 'calendar', 'notifications', 'settings'];
+    return qTab && validTabs.includes(qTab) ? qTab : 'overview';
+  });
+  const [checkInLoading, setCheckInLoading] = useState(false);
 
   // Notepad state
   const [noteSearch, setNoteSearch] = useState('');
@@ -165,21 +177,33 @@ export const StudentDashboard: React.FC = () => {
     return (
       <div className="mx-auto max-w-md px-4 py-16 text-center">
         <div className="glass-surface rounded-3xl p-8">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow-md">
+            <Trophy className="h-7 w-7" />
+          </div>
           <h1 className="font-display text-xl font-bold text-[#172033] dark:text-white">
-            {t(language, 'navDashboard')}
+            {language === 'bn' ? 'শিক্ষার্থী প্রোফাইল ও ট্রফি রুম' : 'Student Profile & Trophy Room'}
           </h1>
-          <p className="mt-2 text-sm text-[#64748B] dark:text-slate-300">
+          <p className="mt-2 text-xs leading-relaxed text-[#64748B] dark:text-slate-300">
             {language === 'bn'
-              ? 'আপনার অগ্রগতি, নোট ও বুকমার্ক দেখতে পাসওয়ার্ড দিয়ে প্রোফাইল তৈরি বা আনলক করুন।'
-              : 'Create or unlock your personal profile using just a password to track progress and notes.'}
+              ? 'কোনো জিমেইল ছাড়াই শুধু পাসওয়ার্ডে প্রোফাইল তৈরি করুন এবং দৈনিক স্ট্রিক, ব্যাজ ও ট্রফি অর্জন শুরু করুন।'
+              : 'Create or unlock your scholar profile using just a password to earn daily streaks, milestone badges & trophies.'}
           </p>
-          <button
-            type="button"
-            onClick={() => navigate('/login')}
-            className="mt-6 w-full rounded-xl bg-[#172554] py-3 text-sm font-semibold text-white dark:bg-[#BFE8FF] dark:text-[#172554]"
-          >
-            {t(language, 'login')}
-          </button>
+          <div className="mt-6 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => openStudentModal('create')}
+              className="w-full rounded-xl bg-[#172554] py-3 text-xs font-semibold text-white transition hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
+            >
+              {language === 'bn' ? 'নতুন প্রোফাইল' : 'Create Profile'}
+            </button>
+            <button
+              type="button"
+              onClick={() => openStudentModal('unlock')}
+              className="w-full rounded-xl border border-[#172554]/20 bg-white py-3 text-xs font-semibold text-[#172554] transition hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-white"
+            >
+              {language === 'bn' ? 'প্রোফাইল আনলক' : 'Restore Profile'}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -220,6 +244,7 @@ export const StudentDashboard: React.FC = () => {
 
   const navTabs: Array<{ id: DashboardTab; label: string; icon: React.ReactNode }> = [
     { id: 'overview', label: t(language, 'navDashboard'), icon: <BookOpen className="h-4 w-4" /> },
+    { id: 'trophies', label: language === 'bn' ? 'ট্রফি রুম ও ব্যাজ' : 'Trophy Room & Borders', icon: <Trophy className="h-4 w-4" /> },
     { id: 'bookmarks', label: t(language, 'bookmarkedItems'), icon: <Bookmark className="h-4 w-4" /> },
     { id: 'notes', label: t(language, 'personalNotes'), icon: <FileText className="h-4 w-4" /> },
     { id: 'calendar', label: t(language, 'certificates'), icon: <Award className="h-4 w-4" /> },
@@ -228,6 +253,21 @@ export const StudentDashboard: React.FC = () => {
   ];
 
   const activeCertChapter = earnedCertificates.find((c) => c.chapterId === certChapterId);
+  const activeBorderMeta = getBorderMeta(userProfile?.activeBorder);
+  const earnedBadges = userProfile?.badges || ['early_scholar'];
+  const earnedTrophies = userProfile?.trophies || [];
+  const todayDhaka = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const isCheckedInToday = userProfile?.lastActiveDate === todayDhaka;
+
+  const handleOverviewCheckIn = async () => {
+    if (checkInLoading) return;
+    setCheckInLoading(true);
+    try {
+      await dailyCheckIn();
+    } finally {
+      setCheckInLoading(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-[1320px] px-4 py-8 sm:px-6 lg:px-8">
@@ -235,17 +275,17 @@ export const StudentDashboard: React.FC = () => {
         {/* Sidebar */}
         <aside className="glass-surface h-fit rounded-3xl p-5 lg:col-span-3">
           <div className="flex items-center gap-3 border-b border-[#172554]/10 pb-4 dark:border-white/10">
-            <img
-              src={appSettings.branding.logoUrl || BRAND_LOGO_PATH}
-              alt="ASA,LEARN logo"
-              className="h-12 w-auto object-contain"
-            />
+            <div
+              className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#172554] font-display text-lg font-extrabold text-white dark:bg-slate-800 dark:text-[#BFE8FF] ${activeBorderMeta.ringClass}`}
+            >
+              {(userProfile?.fullName || 'S').charAt(0).toUpperCase()}
+            </div>
             <div className="min-w-0">
               <p className="truncate font-display text-sm font-bold text-[#172033] dark:text-white">
                 {userProfile?.fullName || 'Student'}
               </p>
               <p className="font-mono-nums text-xs text-[#263B91] dark:text-[#BFE8FF]">
-                {userProfile?.studentId || 'ASA-STUDENT'}
+                {userProfile?.studentId || 'ASA-STUDENT'} · {userProfile?.xp || 50} XP
               </p>
             </div>
           </div>
@@ -312,10 +352,89 @@ export const StudentDashboard: React.FC = () => {
                   </div>
                   <div className="rounded-2xl bg-white/80 p-4 dark:bg-slate-800/75">
                     <p className="text-xs text-[#64748B] dark:text-slate-400">{t(language, 'studyStreak')}</p>
-                    <p className="font-mono-nums mt-1 text-2xl font-bold text-[#172033] dark:text-white">
+                    <p className="mt-1 inline-flex items-center gap-1.5 font-mono-nums text-2xl font-bold text-orange-600 dark:text-amber-300">
+                      <Flame className="h-5 w-5 fill-current" />
                       {userProfile?.streakDays || 1} {t(language, 'days')}
                     </p>
                   </div>
+                </div>
+              </div>
+
+              {/* Daily Streak & Trophy Room Preview */}
+              <div className="glass-surface rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                      {language === 'bn' ? 'দৈনিক স্ট্রিক, অর্জিত ব্যাজ ও ট্রফি' : 'Daily Streak & Trophy Room Preview'}
+                    </h2>
+                    <p className="mt-0.5 text-xs text-[#64748B] dark:text-slate-400">
+                      {earnedBadges.length}/{Object.keys(BADGE_CATALOG).length}{' '}
+                      {language === 'bn' ? 'ব্যাজ' : 'Badges'} · {earnedTrophies.length}/
+                      {Object.keys(TROPHY_CATALOG).length} {language === 'bn' ? 'ট্রফি অর্জিত' : 'Trophies earned'}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleOverviewCheckIn()}
+                      disabled={checkInLoading}
+                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition ${
+                        isCheckedInToday
+                          ? 'border border-emerald-500/30 bg-emerald-50 text-emerald-800 dark:border-emerald-400/30 dark:bg-emerald-950/50 dark:text-emerald-200'
+                          : 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-xs'
+                      }`}
+                    >
+                      <Flame className="h-3.5 w-3.5 fill-current" />
+                      <span>
+                        {isCheckedInToday
+                          ? language === 'bn'
+                            ? 'আজকের চেক-ইন সম্পন্ন'
+                            : 'Checked In Today'
+                          : language === 'bn'
+                            ? 'দৈনিক স্ট্রিক নিন (+25 XP)'
+                            : 'Claim Streak (+25 XP)'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setTab('trophies')}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[#172554] px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
+                    >
+                      <Trophy className="h-3.5 w-3.5" />
+                      <span>{language === 'bn' ? 'ট্রফি রুম খুলুন' : 'Open Trophy Room'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {earnedBadges.map((bId) => {
+                    const meta = BADGE_CATALOG[bId];
+                    if (!meta) return null;
+                    return (
+                      <div
+                        key={bId}
+                        className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold ${meta.colorClass}`}
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        <span>{language === 'bn' ? meta.nameBn : meta.nameEn}</span>
+                      </div>
+                    );
+                  })}
+                  {earnedTrophies.map((tId) => {
+                    const meta = TROPHY_CATALOG[tId];
+                    if (!meta) return null;
+                    return (
+                      <div
+                        key={tId}
+                        className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold ${meta.colorClass}`}
+                      >
+                        <Trophy className="h-3.5 w-3.5" />
+                        <span>{language === 'bn' ? meta.nameBn : meta.nameEn}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -414,6 +533,8 @@ export const StudentDashboard: React.FC = () => {
               </div>
             </>
           )}
+
+          {tab === 'trophies' && <TrophyRoom />}
 
           {tab === 'bookmarks' && (
             <div className="glass-surface rounded-3xl p-6 sm:p-7">

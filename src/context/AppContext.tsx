@@ -2,7 +2,6 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import {
   onAuthStateChanged,
   signInWithCustomToken,
-  signInWithPopup,
   signOut,
   type User as FirebaseUser,
 } from 'firebase/auth';
@@ -21,7 +20,6 @@ import {
 import {
   auth,
   db,
-  googleProvider,
   handleFirestoreError,
   OperationType,
   testFirestoreConnection,
@@ -30,7 +28,6 @@ import { buildInitialSeedData, DEFAULT_APP_SETTINGS } from '../lib/defaultCurric
 import { createClientId } from '../lib/utils';
 import type {
   AdminAccount,
-  Ai3DSceneBlueprint,
   AiConversation,
   Announcement,
   AppSettings,
@@ -60,6 +57,7 @@ interface AppContextValue {
   isAdmin: boolean;
   currentAdmin: AdminAccount | null;
   adminSessionActive: boolean;
+  adminPasswordUpdatedAt: string | null;
   hasFirestoreAdminAuth: boolean;
   firebaseConnected: boolean;
   language: Language;
@@ -97,13 +95,14 @@ interface AppContextValue {
     password: string;
   }) => Promise<{ profile: UserProfile }>;
   unlockStudentProfile: (password: string) => Promise<{ profile: UserProfile }>;
-  loginAdminWithPassword: (password: string, email?: string) => Promise<void>;
-  loginAdminWithGoogle: () => Promise<void>;
+  loginAdminWithPassword: (password: string) => Promise<void>;
   logoutAdmin: () => Promise<void>;
   changeAdminPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   updateUserProfile: (
-    patch: Partial<Pick<UserProfile, 'fullName' | 'classId' | 'preferredLanguage' | 'preferredTheme' | 'dailyGoalMinutes'>>
+    patch: Partial<
+      Pick<UserProfile, 'fullName' | 'classId' | 'preferredLanguage' | 'preferredTheme' | 'dailyGoalMinutes' | 'activeBorder'>
+    >
   ) => Promise<void>;
   toggleLessonComplete: (lesson: LessonItem, completed: boolean) => Promise<void>;
   recordLessonView: (lesson: LessonItem) => Promise<void>;
@@ -111,13 +110,20 @@ interface AppContextValue {
   saveNote: (note: { noteId?: string; lessonId?: string; subjectId?: string; title: string; content: string }) => Promise<void>;
   deleteNote: (noteId: string) => Promise<void>;
   recordQuizAttempt: (quizId: string, lessonId: string, score: number, totalQuestions: number) => Promise<void>;
+  dailyCheckIn: () => Promise<{
+    checkedInToday: boolean;
+    alreadyCheckedIn: boolean;
+    newlyUnlocked: { badges: string[]; trophies: string[] };
+  } | null>;
+  studentModalOpen: boolean;
+  studentModalTab: 'create' | 'unlock';
+  openStudentModal: (tab?: 'create' | 'unlock') => void;
+  closeStudentModal: () => void;
   aiDrawerOpen: boolean;
   setAiDrawerOpen: (open: boolean) => void;
   aiContextLesson: LessonItem | null;
   aiInitialMode: string | null;
   openAiWithLesson: (lesson: LessonItem | null, initialMode?: string) => void;
-  ai3dBlueprint: Ai3DSceneBlueprint | null;
-  setAi3dBlueprint: (blueprint: Ai3DSceneBlueprint | null) => void;
   route: string;
   navigate: (to: string) => void;
 }
@@ -133,6 +139,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [authLoading, setAuthLoading] = useState(true);
   const [adminSessionActive, setAdminSessionActive] = useState(false);
   const [currentAdmin, setCurrentAdmin] = useState<AdminAccount | null>(null);
+  const [adminPasswordUpdatedAt, setAdminPasswordUpdatedAt] = useState<string | null>(() => {
+    try {
+      const raw = localStorage.getItem('asa_admin_security_meta');
+      if (raw) return (JSON.parse(raw) as { updatedAt?: string }).updatedAt || null;
+    } catch {
+      // ignore
+    }
+    return null;
+  });
   const [firebaseConnected, setFirebaseConnected] = useState(false);
 
   const [language, setLanguageState] = useState<Language>(() => {
@@ -169,7 +184,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const [aiContextLesson, setAiContextLesson] = useState<LessonItem | null>(null);
   const [aiInitialMode, setAiInitialMode] = useState<string | null>(null);
-  const [ai3dBlueprint, setAi3dBlueprint] = useState<Ai3DSceneBlueprint | null>(null);
+  const [studentModalOpen, setStudentModalOpen] = useState(false);
+  const [studentModalTab, setStudentModalTab] = useState<'create' | 'unlock'>('create');
 
   const navigate = useCallback((to: string) => {
     if (to !== window.location.pathname) {
@@ -297,6 +313,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fetch('/api/admin/session', { credentials: 'include' })
       .then((r) => r.json())
       .then((data) => {
+        if (data?.passwordUpdatedAt) {
+          setAdminPasswordUpdatedAt(String(data.passwordUpdatedAt));
+        }
         if (data?.authenticated) {
           setAdminSessionActive(true);
           if (data.admin) setCurrentAdmin(data.admin);
@@ -649,12 +668,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { profile: data.profile as UserProfile };
   }, []);
 
-  const loginAdminWithPassword = useCallback(async (password: string, email?: string) => {
+  const loginAdminWithPassword = useCallback(async (password: string) => {
+    const cleanPassword = password.trim();
     const res = await fetch('/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ password, email }),
+      body: JSON.stringify({ password: cleanPassword }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -667,38 +687,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Admin cookie handles authorization cleanly
       }
     }
-    if (data.admin) setCurrentAdmin(data.admin);
-    setAdminSessionActive(true);
-  }, []);
-
-  const loginAdminWithGoogle = useCallback(async () => {
-    const cred = await signInWithPopup(auth, googleProvider);
-    const idToken = await cred.user.getIdToken();
-    const res = await fetch('/api/admin/firebase-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ idToken }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      await signOut(auth);
-      throw new Error(data.error || 'Google Admin verification failed.');
-    }
-    try {
-      await setDoc(
-        doc(db, 'admins', cred.user.uid),
-        {
-          uid: cred.user.uid,
-          email: cred.user.email || '',
-          role: data.admin?.role || 'admin',
-          createdAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      setFirebaseConnected(true);
-    } catch {
-      // Authorized via owner email or adminEmails allowlist
+    if (data.passwordUpdatedAt) {
+      setAdminPasswordUpdatedAt(String(data.passwordUpdatedAt));
     }
     if (data.admin) setCurrentAdmin(data.admin);
     setAdminSessionActive(true);
@@ -735,6 +725,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!res.ok) {
         throw new Error(data.error || 'Could not update Admin Portal password');
       }
+      const updatedAt = String(data.updatedAt || new Date().toISOString());
+      setAdminPasswordUpdatedAt(updatedAt);
+      try {
+        const bytes = new TextEncoder().encode(`asa-admin-v1:${newPassword.trim()}`);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
+        const digest = Array.from(new Uint8Array(hashBuffer))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+        localStorage.setItem(
+          'asa_admin_security_meta',
+          JSON.stringify({ updatedAt, passwordDigest: digest })
+        );
+      } catch {
+        localStorage.setItem('asa_admin_security_meta', JSON.stringify({ updatedAt }));
+      }
     },
     [firebaseUser]
   );
@@ -756,7 +761,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateUserProfile = useCallback(
     async (
-      patch: Partial<Pick<UserProfile, 'fullName' | 'classId' | 'preferredLanguage' | 'preferredTheme' | 'dailyGoalMinutes'>>
+      patch: Partial<
+        Pick<UserProfile, 'fullName' | 'classId' | 'preferredLanguage' | 'preferredTheme' | 'dailyGoalMinutes' | 'activeBorder'>
+      >
     ) => {
       if (!userProfile?.uid && !firebaseUser?.uid) throw new Error('Unlock your student profile first.');
       const res = await fetch('/api/student/profile/me', {
@@ -811,6 +818,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.progressList)) setProgressList(data.progressList);
+          if (data.profile) setUserProfile(data.profile);
         }
       } catch {
         // non-blocking
@@ -859,6 +867,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.progressList)) setProgressList(data.progressList);
+        if (data.profile) setUserProfile(data.profile);
       }
       if (firebaseUser?.uid) {
         const progressId = `${firebaseUser.uid}_${lesson.lessonId}`;
@@ -997,10 +1006,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.quizAttempts)) setQuizAttempts(data.quizAttempts);
+        if (data.profile) setUserProfile(data.profile);
       }
     },
     [userProfile?.uid, firebaseUser?.uid]
   );
+
+  const dailyCheckIn = useCallback(async () => {
+    const uid = userProfile?.uid || firebaseUser?.uid;
+    if (!uid) return null;
+    try {
+      const res = await fetch('/api/student/learning/daily-checkin', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.profile) setUserProfile(data.profile);
+      return {
+        checkedInToday: Boolean(data.checkedInToday),
+        alreadyCheckedIn: Boolean(data.alreadyCheckedIn),
+        newlyUnlocked: data.newlyUnlocked || { badges: [], trophies: [] },
+      };
+    } catch {
+      return null;
+    }
+  }, [userProfile?.uid, firebaseUser?.uid]);
+
+  const openStudentModal = useCallback((tab: 'create' | 'unlock' = 'create') => {
+    setStudentModalTab(tab);
+    setStudentModalOpen(true);
+  }, []);
+
+  const closeStudentModal = useCallback(() => {
+    setStudentModalOpen(false);
+  }, []);
 
   const openAiWithLesson = useCallback((lesson: LessonItem | null, initialMode?: string) => {
     setAiContextLesson(lesson);
@@ -1015,6 +1055,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isAdmin,
     currentAdmin,
     adminSessionActive,
+    adminPasswordUpdatedAt,
     hasFirestoreAdminAuth,
     firebaseConnected,
     language,
@@ -1048,7 +1089,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createStudentProfile,
     unlockStudentProfile,
     loginAdminWithPassword,
-    loginAdminWithGoogle,
     logoutAdmin,
     changeAdminPassword,
     logout,
@@ -1059,13 +1099,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveNote,
     deleteNote,
     recordQuizAttempt,
+    dailyCheckIn,
+    studentModalOpen,
+    studentModalTab,
+    openStudentModal,
+    closeStudentModal,
     aiDrawerOpen,
     setAiDrawerOpen,
     aiContextLesson,
     aiInitialMode,
     openAiWithLesson,
-    ai3dBlueprint,
-    setAi3dBlueprint,
     route,
     navigate,
   };

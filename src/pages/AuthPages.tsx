@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { AlertCircle, Eye, EyeOff, KeyRound, Sparkles, UserPlus } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { t } from '../i18n/translations';
-import { BRAND_LOGO_PATH } from '../lib/utils';
+import { BRAND_LOGO_PATH, getLogoContrastClass } from '../lib/utils';
 import type { Language } from '../types';
 
 const StudentAccessCard: React.FC<{ initialTab: 'unlock' | 'create' }> = ({ initialTab }) => {
@@ -71,7 +71,7 @@ const StudentAccessCard: React.FC<{ initialTab: 'unlock' | 'create' }> = ({ init
           <img
             src={appSettings.branding.logoUrl || BRAND_LOGO_PATH}
             alt="ASA,LEARN logo"
-            className="h-20 w-auto object-contain"
+            className={`h-20 w-auto object-contain ${getLogoContrastClass(appSettings.branding.logoUrl)}`}
           />
           <h1 className="font-display mt-3 text-xl font-bold text-[#172033] dark:text-white">
             {language === 'bn' ? 'শিক্ষার্থী প্রোফাইল' : 'Student Profile'}

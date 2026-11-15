@@ -10,6 +10,7 @@ import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore, FieldValue } from 'firebase-admin/firestore';
 import { buildInitialSeedData, DEFAULT_APP_SETTINGS } from './src/lib/defaultCurriculum.ts';
+import { evaluateGamificationMilestones } from './src/lib/gamification.ts';
 
 dotenv.config();
 
@@ -264,8 +265,9 @@ async function saveAdminSecret(record: AdminSecretRecord): Promise<void> {
       {
         uid: 'admin_portal',
         passwordHash: record.passwordHash,
-        failedAttempts: record.failedAttempts,
-        lockedUntil: record.lockedUntil,
+        failedAttempts: 0,
+        lockedUntil: null,
+        adminUsers: record.adminUsers,
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -323,6 +325,10 @@ interface StoredStudentRecord {
   accountStatus: 'active' | 'suspended';
   dailyGoalMinutes: number;
   streakDays: number;
+  xp?: number;
+  activeBorder?: string;
+  lastActiveDate?: string;
+  streakHistory?: string[];
   passcodeKey: string;
   passwordHash: string;
   createdAt: string;
@@ -331,6 +337,37 @@ interface StoredStudentRecord {
   bookmarks: Array<Record<string, unknown>>;
   notes: Array<Record<string, unknown>>;
   quizAttempts: Array<Record<string, unknown>>;
+}
+
+function getDhakaDateStr(offsetDays = 0): string {
+  const now = new Date(Date.now() + 6 * 60 * 60 * 1000 + offsetDays * 86_400_000);
+  return now.toISOString().slice(0, 10);
+}
+
+function applyDailyStreak(rec: StoredStudentRecord): { advanced: boolean; alreadyCheckedIn: boolean } {
+  const today = getDhakaDateStr(0);
+  const yesterday = getDhakaDateStr(-1);
+  const history = Array.isArray(rec.streakHistory) ? [...rec.streakHistory] : [];
+  if (rec.lastActiveDate === today) {
+    if (!history.includes(today)) {
+      rec.streakHistory = [...history, today].slice(-30);
+    }
+    return { advanced: false, alreadyCheckedIn: true };
+  }
+  if (rec.lastActiveDate === yesterday) {
+    rec.streakDays = Math.max(1, Number(rec.streakDays || 1)) + 1;
+    rec.xp = Number(rec.xp || 50) + 25;
+  } else if (!rec.lastActiveDate) {
+    rec.streakDays = Math.max(1, Number(rec.streakDays || 1));
+    if (rec.xp === undefined) rec.xp = 50;
+  } else {
+    rec.streakDays = 1;
+    rec.xp = Number(rec.xp || 50) + 25;
+  }
+  rec.lastActiveDate = today;
+  if (!history.includes(today)) history.push(today);
+  rec.streakHistory = history.slice(-30);
+  return { advanced: true, alreadyCheckedIn: false };
 }
 
 function hashPasscodeKey(passcode: string): string {
@@ -353,7 +390,36 @@ function saveStudentStore(store: Record<string, StoredStudentRecord>): void {
   fs.writeFileSync(STUDENT_PROFILES_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 
-function sanitizeStudentProfile(rec: StoredStudentRecord) {
+function computeGamification(
+  completedCount: number,
+  quizScoreTotal: number,
+  streakDays: number,
+  storedXp?: number,
+  likesCount = 0,
+  preferredBorder?: string
+) {
+  return evaluateGamificationMilestones({
+    completedLessonsCount: completedCount,
+    quizScoreTotal,
+    streakDays,
+    storedXp,
+    likesCount,
+    preferredBorder,
+  });
+}
+
+function sanitizeStudentProfile(rec: StoredStudentRecord, likesCount = 0) {
+  const completedCount = (rec.progressList || []).filter((p) => Boolean(p.completed)).length;
+  const quizScoreTotal = (rec.quizAttempts || []).reduce((acc, a) => acc + Number(a.score || 0), 0);
+  const g = computeGamification(
+    completedCount,
+    quizScoreTotal,
+    rec.streakDays || 1,
+    rec.xp,
+    likesCount,
+    rec.activeBorder
+  );
+
   return {
     uid: rec.uid,
     studentId: rec.studentId,
@@ -364,7 +430,17 @@ function sanitizeStudentProfile(rec: StoredStudentRecord) {
     role: rec.role,
     accountStatus: rec.accountStatus,
     dailyGoalMinutes: rec.dailyGoalMinutes,
-    streakDays: rec.streakDays,
+    streakDays: rec.streakDays || 1,
+    lastActiveDate: rec.lastActiveDate || getDhakaDateStr(0),
+    streakHistory: Array.isArray(rec.streakHistory) && rec.streakHistory.length > 0
+      ? rec.streakHistory.slice(-30)
+      : [rec.lastActiveDate || getDhakaDateStr(0)],
+    xp: g.xp,
+    likesCount,
+    badges: g.badges,
+    trophies: g.trophies,
+    unlockedBorders: g.unlockedBorders,
+    activeBorder: g.activeBorder,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
   };
@@ -375,6 +451,7 @@ interface ContentOverrideStore {
   upserts: Record<string, Record<string, Record<string, unknown>>>;
   deletes: Record<string, string[]>;
   activityLogs: Array<Record<string, unknown>>;
+  profileLikes: Record<string, string[]>;
 }
 
 function loadContentOverrides(): ContentOverrideStore {
@@ -387,17 +464,172 @@ function loadContentOverrides(): ContentOverrideStore {
           upserts: parsed.upserts || {},
           deletes: parsed.deletes || {},
           activityLogs: Array.isArray(parsed.activityLogs) ? parsed.activityLogs : [],
+          profileLikes: parsed.profileLikes && typeof parsed.profileLikes === 'object' ? parsed.profileLikes : {},
         };
       }
     }
   } catch {
     // Ignore parse errors
   }
-  return { upserts: {}, deletes: {}, activityLogs: [] };
+  return { upserts: {}, deletes: {}, activityLogs: [], profileLikes: {} };
 }
 
 function saveContentOverrides(store: ContentOverrideStore): void {
   fs.writeFileSync(CONTENT_OVERRIDE_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
+}
+
+const SHOWCASE_LEADERBOARD_SCHOLARS = [
+  {
+    uid: 'scholar_arafat_10',
+    studentId: 'ASA-1001',
+    fullName: 'Arafat Hossain',
+    classId: 'class-10',
+    streakDays: 14,
+    xp: 1480,
+    completedLessonsCount: 18,
+    quizScoreTotal: 22,
+    baseLikes: 19,
+    activeBorder: 'aurora_3d',
+  },
+  {
+    uid: 'scholar_nusrat_9',
+    studentId: 'ASA-1002',
+    fullName: 'Nusrat Jahan Mim',
+    classId: 'class-9',
+    streakDays: 11,
+    xp: 1120,
+    completedLessonsCount: 14,
+    quizScoreTotal: 17,
+    baseLikes: 15,
+    activeBorder: 'gold_champion',
+  },
+  {
+    uid: 'scholar_tahmid_8',
+    studentId: 'ASA-1003',
+    fullName: 'Tahmidul Islam',
+    classId: 'class-8',
+    streakDays: 8,
+    xp: 840,
+    completedLessonsCount: 10,
+    quizScoreTotal: 12,
+    baseLikes: 11,
+    activeBorder: 'gold_champion',
+  },
+  {
+    uid: 'scholar_sadia_7',
+    studentId: 'ASA-1004',
+    fullName: 'Sadia Afrin',
+    classId: 'class-7',
+    streakDays: 5,
+    xp: 520,
+    completedLessonsCount: 6,
+    quizScoreTotal: 8,
+    baseLikes: 8,
+    activeBorder: 'emerald_scholar',
+  },
+];
+
+async function generateLessonPracticeWithAi(opts: {
+  lessonId: string;
+  title: string;
+  description?: string;
+  classId?: string;
+  subjectId?: string;
+}) {
+  if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+    return null;
+  }
+
+  const response = await generateWithRetry('gemini-4-hydrogen', {
+    contents: `You are an NCTB Bangladeshi School Curriculum AI Examiner (${opts.classId || 'Class 6-10'}, Subject: ${opts.subjectId || 'General'}).
+Based on this video class title and description:
+Title: "${opts.title}"
+Description: "${opts.description || opts.title}"
+
+Generate bilingual practice assessment in BOTH English and natural Unicode Bangla (বাংলা):
+1) 4 Multiple Choice Questions (MCQs) with 4 options each, accurate correctIndex (0-3), and concise explanations.
+2) 2 Creative / Short Questions (CQs / সৃজনশীল ও সংক্ষিপ্ত প্রশ্ন) each with a brief scenario stem, 3 progressive sub-questions (a/ক, b/খ, c/গ), and a clear model answer.`,
+    config: {
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          questions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                question: { type: Type.STRING },
+                questionBn: { type: Type.STRING },
+                options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                optionsBn: { type: Type.ARRAY, items: { type: Type.STRING } },
+                correctIndex: { type: Type.INTEGER },
+                explanation: { type: Type.STRING },
+                explanationBn: { type: Type.STRING },
+              },
+              required: ['question', 'questionBn', 'options', 'optionsBn', 'correctIndex', 'explanation', 'explanationBn'],
+            },
+          },
+          creativeQuestions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                stem: { type: Type.STRING },
+                stemBn: { type: Type.STRING },
+                questions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                questionsBn: { type: Type.ARRAY, items: { type: Type.STRING } },
+                modelAnswer: { type: Type.STRING },
+                modelAnswerBn: { type: Type.STRING },
+              },
+              required: ['stem', 'stemBn', 'questions', 'questionsBn', 'modelAnswer', 'modelAnswerBn'],
+            },
+          },
+        },
+        required: ['questions', 'creativeQuestions'],
+      },
+    },
+  });
+
+  const parsed = JSON.parse((response.text ?? '{}').trim());
+  const suffix = crypto.randomBytes(3).toString('hex');
+  const questions = (Array.isArray(parsed.questions) ? parsed.questions : []).slice(0, 6).map(
+    (q: Record<string, unknown>, idx: number) => ({
+      id: `aiq_${suffix}_${idx + 1}`,
+      question: String(q.question || ''),
+      questionBn: String(q.questionBn || q.question || ''),
+      options: Array.isArray(q.options) ? q.options.slice(0, 4).map(String) : ['Option A', 'Option B', 'Option C', 'Option D'],
+      optionsBn: Array.isArray(q.optionsBn) ? q.optionsBn.slice(0, 4).map(String) : undefined,
+      correctIndex: Math.min(Math.max(Number(q.correctIndex || 0), 0), 3),
+      explanation: String(q.explanation || ''),
+      explanationBn: String(q.explanationBn || q.explanation || ''),
+    })
+  );
+
+  const creativeQuestions = (Array.isArray(parsed.creativeQuestions) ? parsed.creativeQuestions : []).slice(0, 3).map(
+    (cq: Record<string, unknown>, idx: number) => ({
+      id: `aicq_${suffix}_${idx + 1}`,
+      stem: String(cq.stem || ''),
+      stemBn: String(cq.stemBn || cq.stem || ''),
+      questions: Array.isArray(cq.questions) ? cq.questions.map(String) : [],
+      questionsBn: Array.isArray(cq.questionsBn) ? cq.questionsBn.map(String) : undefined,
+      modelAnswer: String(cq.modelAnswer || ''),
+      modelAnswerBn: String(cq.modelAnswerBn || cq.modelAnswer || ''),
+    })
+  );
+
+  const now = new Date().toISOString();
+  return {
+    quizId: `quiz_ai_${opts.lessonId}_${suffix}`.slice(0, 60),
+    lessonId: opts.lessonId,
+    title: `${opts.title} — AI Practice`,
+    questions,
+    creativeQuestions,
+    status: 'published',
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 function mergeCollectionWithOverrides<T extends Record<string, unknown>>(
@@ -519,6 +751,13 @@ function isAdminSdkCredentialError(err: unknown): boolean {
 }
 
 async function getAiSettingsFromFirestore() {
+  const overrides = loadContentOverrides();
+  if (overrides.settings && typeof overrides.settings === 'object' && 'aiSettings' in overrides.settings) {
+    return {
+      ...DEFAULT_APP_SETTINGS.aiSettings,
+      ...(overrides.settings.aiSettings as Partial<typeof DEFAULT_APP_SETTINGS.aiSettings>),
+    };
+  }
   try {
     const snap = await adminDb.collection('appSettings').doc('global').get();
     if (snap.exists) {
@@ -1011,12 +1250,14 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // Admin Portal Multi-Admin & Google/Password Authentication (Separate from Student Auth)
+  // Admin Portal Multi-Admin & Google/Shared-Password Authentication (Separate from Student Auth)
   app.get('/api/admin/session', async (req: Request, res: Response) => {
+    const secret = await ensureAdminPasswordInitialized();
     const cookieAdmin = resolveAdminCookie(req);
     if (cookieAdmin) {
       res.json({
         authenticated: true,
+        passwordUpdatedAt: secret.updatedAt,
         admin: {
           uid: cookieAdmin.uid,
           name: cookieAdmin.name || 'Administrator',
@@ -1033,6 +1274,7 @@ async function startServer() {
       ((user?.email === OWNER_EMAIL && user?.emailVerified === true) || user?.role === 'admin' || user?.role === 'owner');
     res.json({
       authenticated: isFirebaseAdmin,
+      passwordUpdatedAt: secret.updatedAt,
       admin: isFirebaseAdmin && user
         ? {
             uid: user.uid,
@@ -1047,38 +1289,42 @@ async function startServer() {
 
   app.post('/api/admin/login', async (req: Request, res: Response) => {
     const ip = req.ip || 'unknown';
-    if (!checkRateLimit(`admin-login:${ip}`, 20, 60_000)) {
-      res.status(429).json({ error: 'Too many admin login attempts. Please wait a minute.' });
+    if (!checkRateLimit(`admin-login:${ip}`, 60, 60_000)) {
+      res.status(429).json({ error: 'Too many requests. Please wait a brief moment.' });
       return;
     }
 
     try {
-      const { password, email } = req.body || {};
-      if (!password || typeof password !== 'string') {
+      const { password } = req.body || {};
+      const cleanPassword = typeof password === 'string' ? password.trim() : '';
+      if (!cleanPassword) {
         res.status(400).json({ error: 'Admin Portal password is required.' });
         return;
       }
 
       const secret = await ensureAdminPasswordInitialized();
-      if (secret.lockedUntil && new Date(secret.lockedUntil).getTime() > Date.now()) {
-        res.status(423).json({
-          error: 'Admin Portal temporarily locked due to repeated incorrect attempts. Please try again in 5 minutes.',
-        });
-        return;
-      }
-
       const activeAdmins = secret.adminUsers.filter((u) => u.active);
       let matchedAdmin: StoredAdminUser | null = null;
 
-      if (email && typeof email === 'string' && email.trim()) {
-        const targetEmail = email.trim().toLowerCase();
-        const candidate = activeAdmins.find((u) => u.email?.toLowerCase() === targetEmail);
-        if (candidate && (await bcrypt.compare(password, candidate.passwordHash))) {
-          matchedAdmin = candidate;
-        }
-      } else {
+      // 1. Check Shared Primary Admin Password
+      const matchesSharedPassword = await bcrypt.compare(cleanPassword, secret.passwordHash);
+      if (matchesSharedPassword) {
+        matchedAdmin =
+          activeAdmins.find((u) => u.isPrimary) || {
+            uid: 'asa_owner_admin',
+            name: 'Admin Team',
+            role: 'owner',
+            passwordHash: secret.passwordHash,
+            active: true,
+            isPrimary: true,
+            createdAt: secret.updatedAt,
+          };
+      }
+
+      // 2. Check delegated co-admin passcodes granted by the main Admin
+      if (!matchedAdmin) {
         for (const candidate of activeAdmins) {
-          if (await bcrypt.compare(password, candidate.passwordHash)) {
+          if (await bcrypt.compare(cleanPassword, candidate.passwordHash)) {
             matchedAdmin = candidate;
             break;
           }
@@ -1086,24 +1332,17 @@ async function startServer() {
       }
 
       if (!matchedAdmin) {
-        const nextAttempts = secret.failedAttempts + 1;
-        const lockedUntil = nextAttempts >= 6 ? new Date(Date.now() + 5 * 60 * 1000).toISOString() : null;
-        await saveAdminSecret({
-          ...secret,
-          failedAttempts: nextAttempts >= 6 ? 0 : nextAttempts,
-          lockedUntil,
-          updatedAt: new Date().toISOString(),
-        });
         res.status(401).json({ error: 'Incorrect Admin Portal password.' });
         return;
       }
 
+      // Clear any legacy lock flag without locking out valid admins
       if (secret.failedAttempts > 0 || secret.lockedUntil) {
         await saveAdminSecret({
           ...secret,
           failedAttempts: 0,
           lockedUntil: null,
-          updatedAt: new Date().toISOString(),
+          updatedAt: secret.updatedAt || new Date().toISOString(),
         });
       }
 
@@ -1128,7 +1367,6 @@ async function startServer() {
         await adminDb.collection('admins').doc(matchedAdmin.uid).set(
           {
             uid: matchedAdmin.uid,
-            email: matchedAdmin.email || OWNER_EMAIL,
             role: matchedAdmin.role,
             createdAt: FieldValue.serverTimestamp(),
           },
@@ -1139,73 +1377,20 @@ async function startServer() {
         customToken = null;
       }
 
-      res.json({ authenticated: true, admin: sanitizeAdminUser(matchedAdmin), customToken });
+      res.json({
+        authenticated: true,
+        passwordUpdatedAt: secret.updatedAt,
+        admin: sanitizeAdminUser(matchedAdmin),
+        customToken,
+      });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Admin login failed.' });
     }
   });
 
-  app.post('/api/admin/firebase-login', async (req: Request, res: Response) => {
-    try {
-      const { idToken } = req.body || {};
-      if (!idToken || typeof idToken !== 'string') {
-        res.status(400).json({ error: 'Google ID token is required.' });
-        return;
-      }
-      const decoded = await adminAuth.verifyIdToken(idToken);
-      const email = decoded.email?.trim().toLowerCase() || '';
-      if (!decoded.email_verified || !email) {
-        res.status(403).json({ error: 'A verified Google email is required.' });
-        return;
-      }
-
-      const secret = await ensureAdminPasswordInitialized();
-      const matched = secret.adminUsers.find((u) => u.active && u.email?.toLowerCase() === email);
-      const isPrimaryOwner = email === OWNER_EMAIL;
-
-      if (!isPrimaryOwner && !matched) {
-        res.status(403).json({
-          error: `Google account (${email}) is not registered as an admin. Ask an existing admin to grant access first.`,
-        });
-        return;
-      }
-
-      const adminInfo = matched || {
-        uid: decoded.uid,
-        name: decoded.name || 'Primary Owner',
-        email,
-        role: 'owner' as const,
-        passwordHash: secret.passwordHash,
-        active: true,
-        isPrimary: true,
-        createdAt: new Date().toISOString(),
-      };
-
-      const maxAge = 7 * 24 * 60 * 60 * 1000;
-      const adminToken = signSessionToken({
-        uid: adminInfo.uid,
-        role: adminInfo.role,
-        name: adminInfo.name,
-        email,
-        exp: Date.now() + maxAge,
-      });
-
-      res.cookie(ADMIN_COOKIE_NAME, adminToken, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
-        maxAge,
-      });
-
-      res.json({ authenticated: true, admin: sanitizeAdminUser(adminInfo) });
-    } catch (err) {
-      res.status(401).json({ error: err instanceof Error ? err.message : 'Could not verify Google Admin login.' });
-    }
-  });
-
   app.get('/api/admin/admins', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
     const secret = await ensureAdminPasswordInitialized();
-    res.json({ admins: secret.adminUsers.map(sanitizeAdminUser) });
+    res.json({ admins: secret.adminUsers.map(sanitizeAdminUser), passwordUpdatedAt: secret.updatedAt });
   });
 
   app.post('/api/admin/admins', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
@@ -1227,13 +1412,6 @@ async function startServer() {
       if (cleanEmail && secret.adminUsers.some((u) => u.email?.toLowerCase() === cleanEmail)) {
         res.status(409).json({ error: 'An admin with this email already exists.' });
         return;
-      }
-
-      for (const existing of secret.adminUsers) {
-        if (await bcrypt.compare(cleanPass, existing.passwordHash)) {
-          res.status(409).json({ error: 'Choose a distinct password for each admin so they log into their own admin account.' });
-          return;
-        }
       }
 
       const newAdmin: StoredAdminUser = {
@@ -1346,40 +1524,47 @@ async function startServer() {
   app.post('/api/admin/change-password', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
     try {
       const { currentPassword, newPassword } = req.body || {};
-      if (!currentPassword || !newPassword) {
+      const cleanCurrent = typeof currentPassword === 'string' ? currentPassword.trim() : '';
+      const cleanNew = typeof newPassword === 'string' ? newPassword.trim() : '';
+      if (!cleanCurrent || !cleanNew) {
         res.status(400).json({ error: 'Current password and new password are required.' });
         return;
       }
-      if (String(newPassword).length < 6) {
+      if (cleanNew.length < 6) {
         res.status(400).json({ error: 'New Admin Portal password must be at least 6 characters long.' });
         return;
       }
 
       const secret = await ensureAdminPasswordInitialized();
-      const caller =
-        secret.adminUsers.find((u) => u.uid === req.authUser?.uid) ||
-        secret.adminUsers.find((u) => u.isPrimary) ||
-        secret.adminUsers[0];
-      const hashToCheck = caller?.passwordHash || secret.passwordHash;
-      const valid = await bcrypt.compare(String(currentPassword), hashToCheck);
-      if (!valid) {
+      const caller = secret.adminUsers.find((u) => u.uid === req.authUser?.uid);
+      const primary = secret.adminUsers.find((u) => u.isPrimary || u.uid === 'asa_owner_admin');
+      const matchesShared = await bcrypt.compare(cleanCurrent, secret.passwordHash);
+      const matchesPrimary = primary ? await bcrypt.compare(cleanCurrent, primary.passwordHash) : false;
+      const matchesCaller = caller ? await bcrypt.compare(cleanCurrent, caller.passwordHash) : false;
+
+      if (!matchesShared && !matchesPrimary && !matchesCaller) {
         res.status(401).json({ error: 'Current password is incorrect.' });
         return;
       }
 
-      const nextHash = await bcrypt.hash(String(newPassword), 12);
-      if (caller) {
-        caller.passwordHash = nextHash;
+      const nextHash = await bcrypt.hash(cleanNew, 12);
+      secret.passwordHash = nextHash;
+      if (primary) {
+        primary.passwordHash = nextHash;
       }
-      if (!caller || caller.isPrimary) {
-        secret.passwordHash = nextHash;
+      if (caller && (caller.isPrimary || matchesShared)) {
+        caller.passwordHash = nextHash;
       }
       secret.failedAttempts = 0;
       secret.lockedUntil = null;
       secret.updatedAt = new Date().toISOString();
       await saveAdminSecret(secret);
 
-      res.json({ ok: true, message: 'Admin Portal password updated successfully.' });
+      res.json({
+        ok: true,
+        updatedAt: secret.updatedAt,
+        message: 'Admin Portal password updated successfully.',
+      });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Could not update Admin password.' });
     }
@@ -1486,7 +1671,7 @@ async function startServer() {
     }
   });
 
-  // AI Personal Tutor Endpoint (Bangla, Math Step-by-Step, PDF QA, Voice, Chapter Summary, Recommendations)
+  // Streamlined AI Personal Tutor Endpoint (answers academic doubts + suggests relevant study notes / PDF links)
   app.post('/api/ai/tutor', async (req: AuthenticatedRequest, res: Response) => {
     try {
       if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
@@ -1511,64 +1696,102 @@ async function startServer() {
 
       const {
         message,
-        mode = 'general',
         language = 'en',
-        classContext = 'Class 9',
-        subjectContext = 'General',
+        classContext = '',
+        subjectContext = '',
         lessonContext = '',
         history = [],
-        pdfBase64,
-        pdfMimeType,
-        pdfFileName,
       } = req.body || {};
 
-      if (!message || String(message).trim().length === 0) {
+      const cleanMessage = String(message || '').trim();
+      if (!cleanMessage) {
         res.status(400).json({ error: 'Please enter a question for the AI Tutor.' });
         return;
       }
 
-      if (pdfBase64) {
-        if (!aiSettings.allowPdfUpload) {
-          res.status(403).json({ error: 'PDF upload is disabled by administrator settings.' });
-          return;
-        }
-        if (pdfMimeType !== 'application/pdf') {
-          res.status(400).json({ error: 'Only valid PDF files (application/pdf) are accepted.' });
-          return;
-        }
-        const byteLength = Buffer.byteLength(String(pdfBase64), 'base64');
-        if (byteLength > 10 * 1024 * 1024) {
-          res.status(400).json({ error: 'Uploaded PDF exceeds the 10 MB limit.' });
-          return;
-        }
-      }
+      // Match relevant study PDFs & notes from platform resources
+      const seed = buildInitialSeedData();
+      const overrides = loadContentOverrides();
+      const allResources = mergeCollectionWithOverrides(
+        seed.resources as unknown as Array<Record<string, unknown>>,
+        'resourceId',
+        'resources',
+        overrides
+      );
+      const allLessons = mergeCollectionWithOverrides(
+        seed.lessons as unknown as Array<Record<string, unknown>>,
+        'lessonId',
+        'lessons',
+        overrides
+      );
+      const allSubjects = mergeCollectionWithOverrides(
+        seed.subjects as unknown as Array<Record<string, unknown>>,
+        'subjectId',
+        'subjects',
+        overrides
+      );
 
-      const modeInstructions: Record<string, string> = {
-        bangla_tutor:
-          'Explain concepts in simple, crystal-clear, natural Unicode Bangla suitable for school students. Use friendly analogies.',
-        math_step_by_step:
-          'Break down every mathematical problem into numbered steps, clearly explaining WHY each transformation is performed before showing the result.',
-        visual_3d_guide:
-          'Relate your explanation directly to 3D geometry, interactive angles, forces, or spatial visualization so the student understands what changes as they drag sliders in 3D Mode.',
-        pdf_qa:
-          'Answer strictly using the uploaded PDF whenever possible. Explicitly distinguish between [From Uploaded PDF] and [General Explanation]. If the answer is not in the PDF, state that clearly.',
-        chapter_summary:
-          'Provide a structured, concise chapter summary with Key Definitions, Core Formulas/Principles, and Exam Revision Checkpoints.',
-        recommendations:
-          'Recommend logical next lessons, revision exercises, and practice strategies tailored to the student class and progress.',
-        voice_tutor:
-          'Keep the response clear, conversational, and concise without heavy markdown symbols so it sounds natural when read aloud by text-to-speech.',
-        general:
-          'Provide encouraging, guided educational tutoring adapted to the student grade level.',
-      };
+      const lessonMap = new Map(allLessons.map((l) => [String(l.lessonId || ''), l]));
+      const subjectMap = new Map(allSubjects.map((s) => [String(s.subjectId || ''), s]));
+      const queryTokens = `${cleanMessage} ${classContext} ${subjectContext} ${lessonContext}`
+        .toLowerCase()
+        .split(/[\s,?.!।]+/)
+        .filter((tok) => tok.length >= 2);
+
+      const scoredResources = allResources
+        .map((r) => {
+          const les = lessonMap.get(String(r.lessonId || ''));
+          const sub = les ? subjectMap.get(String(les.subjectId || '')) : undefined;
+          const haystack = [
+            r.title,
+            r.titleBn,
+            les?.title,
+            les?.titleBn,
+            les?.classId,
+            sub?.title,
+            sub?.titleBn,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+
+          let score = 0;
+          for (const tok of queryTokens) {
+            if (haystack.includes(tok)) score += 2;
+          }
+          if (subjectContext && haystack.includes(String(subjectContext).toLowerCase())) score += 3;
+          if (lessonContext && les && String(les.title || '').toLowerCase().includes(String(lessonContext).toLowerCase())) {
+            score += 4;
+          }
+          return { resource: r, score };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3)
+        .map((entry) => ({
+          resourceId: String(entry.resource.resourceId || ''),
+          lessonId: String(entry.resource.lessonId || ''),
+          title: String(entry.resource.title || ''),
+          titleBn: entry.resource.titleBn ? String(entry.resource.titleBn) : undefined,
+          fileUrl: String(entry.resource.fileUrl || ''),
+          fileType: String(entry.resource.fileType || 'PDF'),
+        }));
+
+      const availableNotesContext =
+        scoredResources.length > 0
+          ? `Relevant ASA,LEARN Study Notes/PDFs matching this query:\n${scoredResources
+              .map((resItem) => `- ${resItem.title}${resItem.titleBn ? ` (${resItem.titleBn})` : ''} [Available directly below reply]`)
+              .join('\n')}`
+          : '';
 
       const systemInstruction = [
         aiSettings.systemInstructions,
-        `Target Student Level: ${classContext}. Subject Context: ${subjectContext}.`,
-        lessonContext ? `Current Lesson Context: ${lessonContext}.` : '',
-        `Preferred Response Language: ${language === 'bn' ? 'Bangla (বাংলা)' : 'English'}.`,
-        `Active Mode (${mode}): ${modeInstructions[mode] || modeInstructions.general}`,
-        'Safety & Integrity: Never fabricate textbook page numbers or fake quotes. If unsure, admit uncertainty clearly. Encourage active learning.',
+        classContext ? `Student Class: ${classContext}.` : '',
+        subjectContext ? `Subject Focus: ${subjectContext}.` : '',
+        lessonContext ? `Current Lesson: ${lessonContext}.` : '',
+        `Preferred Language: ${language === 'bn' ? 'Natural Unicode Bangla (বাংলা) unless the student writes strictly in English.' : 'Clear English (or Bangla if the student asks in Bangla).'}` ,
+        'Keep your answer direct, well-structured, easy to read on a phone, and concise.',
+        availableNotesContext,
       ]
         .filter(Boolean)
         .join('\n');
@@ -1581,28 +1804,13 @@ async function startServer() {
         : '';
 
       const promptText = recentHistory
-        ? `Previous context:\n${recentHistory}\n\nCurrent Student Question: ${String(message).trim()}`
-        : String(message).trim();
-
-      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
-      if (pdfBase64) {
-        parts.push({
-          inlineData: {
-            mimeType: 'application/pdf',
-            data: String(pdfBase64),
-          },
-        });
-        parts.push({
-          text: `Attached Educational PDF: ${pdfFileName || 'document.pdf'}\n\n${promptText}`,
-        });
-      } else {
-        parts.push({ text: promptText });
-      }
+        ? `Previous context:\n${recentHistory}\n\nStudent Question: ${cleanMessage}`
+        : cleanMessage;
 
       const modelName = aiSettings.model === 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
 
       const response = await generateWithRetry(modelName, {
-        contents: { parts },
+        contents: { parts: [{ text: promptText }] },
         config: {
           systemInstruction,
         },
@@ -1612,6 +1820,7 @@ async function startServer() {
 
       res.json({
         reply: response.text || 'I could not generate a response. Please rephrase your question.',
+        matchedResources: scoredResources,
         model: modelName,
         quotaRemaining: Math.max(0, limit - (currentCount + 1)),
       });
@@ -1704,87 +1913,6 @@ async function startServer() {
 
       const plan = JSON.parse((response.text ?? '[]').trim());
       res.json({ plan });
-    } catch (err) {
-      const parsed = extractRetryError(err);
-      res.status(parsed.status).json({ error: parsed.message });
-    }
-  });
-
-  // AI Topic-to-3D Interactive Scene Generator
-  app.post('/api/ai/topic-3d', async (req: Request, res: Response) => {
-    try {
-      if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
-        res.status(503).json({ error: 'GEMINI_API_KEY is not configured in server secrets.' });
-        return;
-      }
-
-      const { topic, language = 'en', classTitle = 'Class 9', subjectTitle = 'Science' } = req.body || {};
-      const cleanTopic = String(topic || '').trim();
-      if (cleanTopic.length < 2) {
-        res.status(400).json({ error: 'Please provide a topic name to visualize in 3D.' });
-        return;
-      }
-
-      const response = await generateWithRetry('gemini-4-hydrogen', {
-        contents: `You are an interactive 3D Educational Visualizer for Bangladeshi school students (${classTitle}, ${subjectTitle}).
-A student chose the topic: "${cleanTopic}".
-Design an informative, visually distinct 3D scene using Three.js primitive shapes so the student understands this concept interactively on screen, plus clear bilingual English and natural Unicode Bangla explanations.
-Constraints for "objects":
-- Provide 5 to 10 geometric objects forming a recognizable scientific/mathematical diagram of "${cleanTopic}".
-- Use kinds only from ['sphere', 'box', 'cylinder', 'cone', 'torus', 'octahedron', 'ring'].
-- Keep positions within x: [-2.8, 2.8], y: [-1.2, 2.2], z: [-2.8, 2.8] and scales between 0.15 and 2.5.
-- Choose rich, contrasting hex colors (#38BDF8, #F472B6, #FACC15, #10B981, #A78BFA, #FB7185, #FFFFFF).
-- Assign realistic motion from ['static', 'orbit', 'spin', 'oscillate', 'explode'].
-- Provide a meaningful interactive slider (sliderLabel, sliderLabelBn, sliderMin: 0, sliderMax: 100, sliderDefault: 50).`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              topic: { type: Type.STRING },
-              title: { type: Type.STRING },
-              titleBn: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              summaryBn: { type: Type.STRING },
-              keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
-              sliderLabel: { type: Type.STRING },
-              sliderLabelBn: { type: Type.STRING },
-              sliderMin: { type: Type.INTEGER },
-              sliderMax: { type: Type.INTEGER },
-              sliderDefault: { type: Type.INTEGER },
-              objects: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    label: { type: Type.STRING },
-                    labelBn: { type: Type.STRING },
-                    kind: { type: Type.STRING },
-                    color: { type: Type.STRING },
-                    position: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                    scale: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                    rotation: { type: Type.ARRAY, items: { type: Type.NUMBER } },
-                    motion: { type: Type.STRING },
-                    motionSpeed: { type: Type.NUMBER },
-                    orbitRadius: { type: Type.NUMBER },
-                    opacity: { type: Type.NUMBER },
-                  },
-                  required: ['label', 'labelBn', 'kind', 'color', 'position', 'scale', 'motion'],
-                },
-              },
-            },
-            required: ['topic', 'title', 'titleBn', 'summary', 'summaryBn', 'keyPoints', 'sliderLabel', 'sliderLabelBn', 'objects'],
-          },
-        },
-      });
-
-      const blueprint = JSON.parse((response.text ?? '{}').trim());
-      blueprint.topic = cleanTopic;
-      if (!Array.isArray(blueprint.objects) || blueprint.objects.length === 0) {
-        throw new Error('Could not generate 3D objects for this topic.');
-      }
-      res.json({ blueprint, preferredLanguage: language });
     } catch (err) {
       const parsed = extractRetryError(err);
       res.status(parsed.status).json({ error: parsed.message });
@@ -1928,6 +2056,7 @@ Constraints for "objects":
       const studentId = `ASA-${crypto.randomInt(1000, 9999)}`;
       const passwordHash = await bcrypt.hash(cleanPass, 10);
       const now = new Date().toISOString();
+      const today = getDhakaDateStr(0);
 
       const record: StoredStudentRecord = {
         uid,
@@ -1940,6 +2069,9 @@ Constraints for "objects":
         accountStatus: 'active',
         dailyGoalMinutes: 45,
         streakDays: 1,
+        xp: 50,
+        lastActiveDate: today,
+        streakHistory: [today],
         passcodeKey,
         passwordHash,
         createdAt: now,
@@ -2018,6 +2150,16 @@ Constraints for "objects":
         return;
       }
 
+      const streakCheck = applyDailyStreak(match);
+      if (streakCheck.advanced) {
+        match.updatedAt = new Date().toISOString();
+        store[match.uid] = match;
+        saveStudentStore(store);
+      }
+
+      const overrides = loadContentOverrides();
+      const likesCount = (overrides.profileLikes[match.uid] || []).length;
+
       const token = signSessionToken({ uid: match.uid, role: 'student', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 });
       res.cookie(STUDENT_COOKIE_NAME, token, {
         httpOnly: true,
@@ -2027,7 +2169,7 @@ Constraints for "objects":
       });
 
       res.json({
-        profile: sanitizeStudentProfile(match),
+        profile: sanitizeStudentProfile(match, likesCount),
         progressList: match.progressList || [],
         bookmarks: match.bookmarks || [],
         notes: match.notes || [],
@@ -2050,8 +2192,10 @@ Constraints for "objects":
       res.json({ profile: null });
       return;
     }
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
     res.json({
-      profile: sanitizeStudentProfile(rec),
+      profile: sanitizeStudentProfile(rec, likesCount),
       progressList: rec.progressList || [],
       bookmarks: rec.bookmarks || [],
       notes: rec.notes || [],
@@ -2071,7 +2215,7 @@ Constraints for "objects":
       res.status(404).json({ error: 'Profile not found.' });
       return;
     }
-    const { fullName, classId, preferredLanguage, preferredTheme, dailyGoalMinutes } = req.body || {};
+    const { fullName, classId, preferredLanguage, preferredTheme, dailyGoalMinutes, activeBorder } = req.body || {};
     if (typeof fullName === 'string' && fullName.trim().length >= 2) rec.fullName = fullName.trim().slice(0, 120);
     if (typeof classId === 'string' && classId.trim()) rec.classId = classId.trim();
     if (preferredLanguage === 'bn' || preferredLanguage === 'en') rec.preferredLanguage = preferredLanguage;
@@ -2079,10 +2223,20 @@ Constraints for "objects":
     if (typeof dailyGoalMinutes === 'number' && dailyGoalMinutes >= 5 && dailyGoalMinutes <= 600) {
       rec.dailyGoalMinutes = dailyGoalMinutes;
     }
+    if (typeof activeBorder === 'string' && activeBorder.trim()) {
+      const overrides = loadContentOverrides();
+      const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+      const sanitized = sanitizeStudentProfile(rec, likesCount);
+      if (sanitized.unlockedBorders.includes(activeBorder.trim())) {
+        rec.activeBorder = activeBorder.trim();
+      }
+    }
     rec.updatedAt = new Date().toISOString();
     store[rec.uid] = rec;
     saveStudentStore(store);
-    res.json({ profile: sanitizeStudentProfile(rec) });
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+    res.json({ profile: sanitizeStudentProfile(rec, likesCount) });
   });
 
   app.post('/api/student/profile/logout', (_req: Request, res: Response) => {
@@ -2090,8 +2244,231 @@ Constraints for "objects":
     res.json({ ok: true });
   });
 
+  // Safe Public Leaderboard & Like/Applaud (Strictly ZERO Chat or PII)
+  app.get('/api/leaderboard', (req: Request, res: Response) => {
+    const stuUser = resolveStudentCookie(req);
+    const viewerId = stuUser?.uid || `guest_${hashPhoneKey(req.ip || 'anon').slice(0, 16)}`;
+    const store = loadStudentStore();
+    const overrides = loadContentOverrides();
+    const profileLikes = overrides.profileLikes || {};
+
+    const realProfiles = Object.values(store)
+      .filter((s) => s.accountStatus !== 'suspended')
+      .map((rec) => {
+        const likers = profileLikes[rec.uid] || [];
+        const sanitized = sanitizeStudentProfile(rec, likers.length);
+        const completedLessonsCount = (rec.progressList || []).filter((p) => Boolean(p.completed)).length;
+        const quizScoreTotal = (rec.quizAttempts || []).reduce((acc, a) => acc + Number(a.score || 0), 0);
+        return {
+          uid: sanitized.uid,
+          studentId: sanitized.studentId,
+          fullName: sanitized.fullName,
+          classId: sanitized.classId,
+          streakDays: sanitized.streakDays,
+          xp: sanitized.xp,
+          completedLessonsCount,
+          quizScoreTotal,
+          likesCount: sanitized.likesCount,
+          likedByMe: likers.includes(viewerId),
+          badges: sanitized.badges,
+          trophies: sanitized.trophies,
+          activeBorder: sanitized.activeBorder,
+          unlockedBorders: sanitized.unlockedBorders,
+        };
+      });
+
+    const showcaseProfiles = SHOWCASE_LEADERBOARD_SCHOLARS.map((sc) => {
+      const likers = profileLikes[sc.uid] || [];
+      const g = computeGamification(
+        sc.completedLessonsCount,
+        sc.quizScoreTotal,
+        sc.streakDays,
+        sc.xp,
+        sc.baseLikes + likers.length,
+        sc.activeBorder
+      );
+      return {
+        uid: sc.uid,
+        studentId: sc.studentId,
+        fullName: sc.fullName,
+        classId: sc.classId,
+        streakDays: sc.streakDays,
+        xp: g.xp,
+        completedLessonsCount: sc.completedLessonsCount,
+        quizScoreTotal: sc.quizScoreTotal,
+        likesCount: sc.baseLikes + likers.length,
+        likedByMe: likers.includes(viewerId),
+        badges: g.badges,
+        trophies: g.trophies,
+        activeBorder: g.activeBorder,
+        unlockedBorders: g.unlockedBorders,
+      };
+    });
+
+    const leaderboard = [...realProfiles, ...showcaseProfiles].sort((a, b) => b.xp - a.xp || b.streakDays - a.streakDays);
+    res.json({ leaderboard });
+  });
+
+  app.post('/api/students/:uid/like', (req: Request, res: Response) => {
+    const targetUid = String(req.params.uid || '').trim();
+    if (!targetUid) {
+      res.status(400).json({ error: 'Target profile ID required.' });
+      return;
+    }
+    const stuUser = resolveStudentCookie(req);
+    const viewerId = stuUser?.uid || `guest_${hashPhoneKey(req.ip || 'anon').slice(0, 16)}`;
+
+    const store = loadStudentStore();
+    const showcase = SHOWCASE_LEADERBOARD_SCHOLARS.find((s) => s.uid === targetUid);
+    if (!store[targetUid] && !showcase) {
+      res.status(404).json({ error: 'Student profile not found.' });
+      return;
+    }
+
+    const overrides = loadContentOverrides();
+    if (!overrides.profileLikes) overrides.profileLikes = {};
+    const list = overrides.profileLikes[targetUid] || [];
+    const alreadyLiked = list.includes(viewerId);
+    const nextList = alreadyLiked ? list.filter((id) => id !== viewerId) : [...list, viewerId];
+    overrides.profileLikes[targetUid] = nextList;
+    saveContentOverrides(overrides);
+
+    const baseCount = showcase ? showcase.baseLikes : 0;
+    res.json({
+      ok: true,
+      uid: targetUid,
+      likesCount: baseCount + nextList.length,
+      likedByMe: !alreadyLiked,
+    });
+  });
+
+  // On-demand AI Practice Generator (MCQs + Creative Questions) for any Lesson
+  app.post('/api/ai/lesson-practice', async (req: Request, res: Response) => {
+    try {
+      const { lessonId, title, description, classId, subjectId } = req.body || {};
+      if (!lessonId || !title) {
+        res.status(400).json({ error: 'lessonId and title are required.' });
+        return;
+      }
+      const generated = await generateLessonPracticeWithAi({ lessonId, title, description, classId, subjectId });
+      if (!generated) {
+        res.status(503).json({ error: 'GEMINI_API_KEY is not configured.' });
+        return;
+      }
+
+      const overrides = loadContentOverrides();
+      if (!overrides.upserts.quizzes) overrides.upserts.quizzes = {};
+      overrides.upserts.quizzes![generated.quizId] = generated as unknown as Record<string, unknown>;
+      saveContentOverrides(overrides);
+
+      res.json({ ok: true, quiz: generated });
+    } catch (err) {
+      const parsed = extractRetryError(err);
+      res.status(parsed.status).json({ error: parsed.message });
+    }
+  });
+
+  // Student Trophy Room & Daily Streak Check-in Endpoints
+  app.get('/api/student/trophies', (req: Request, res: Response) => {
+    const stuUser = resolveStudentCookie(req);
+    if (!stuUser) {
+      res.status(401).json({ error: 'Unlock student profile first.' });
+      return;
+    }
+    const store = loadStudentStore();
+    const rec = store[stuUser.uid];
+    if (!rec) {
+      res.status(404).json({ error: 'Profile not found.' });
+      return;
+    }
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+    const completedLessonsCount = (rec.progressList || []).filter((p) => Boolean(p.completed)).length;
+    const quizScoreTotal = (rec.quizAttempts || []).reduce((acc, a) => acc + Number(a.score || 0), 0);
+    const today = getDhakaDateStr(0);
+
+    const evaluated = computeGamification(
+      completedLessonsCount,
+      quizScoreTotal,
+      rec.streakDays || 1,
+      rec.xp,
+      likesCount,
+      rec.activeBorder
+    );
+    const sanitized = sanitizeStudentProfile(rec, likesCount);
+
+    res.json({
+      profile: sanitized,
+      metrics: {
+        xp: evaluated.xp,
+        streakDays: sanitized.streakDays,
+        lastActiveDate: sanitized.lastActiveDate,
+        streakHistory: sanitized.streakHistory,
+        checkedInToday: rec.lastActiveDate === today,
+        completedLessonsCount,
+        quizScoreTotal,
+        quizAttemptsCount: (rec.quizAttempts || []).length,
+        likesCount,
+      },
+      badges: evaluated.badges,
+      trophies: evaluated.trophies,
+      unlockedBorders: evaluated.unlockedBorders,
+      activeBorder: evaluated.activeBorder,
+      badgeProgress: evaluated.badgeProgress,
+      trophyProgress: evaluated.trophyProgress,
+    });
+  });
+
+  app.post('/api/student/learning/daily-checkin', async (req: Request, res: Response) => {
+    const stuUser = resolveStudentCookie(req);
+    if (!stuUser) {
+      res.status(401).json({ error: 'Unlock student profile first.' });
+      return;
+    }
+    const store = loadStudentStore();
+    const rec = store[stuUser.uid];
+    if (!rec) {
+      res.status(404).json({ error: 'Profile not found.' });
+      return;
+    }
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+    const before = sanitizeStudentProfile(rec, likesCount);
+
+    const check = applyDailyStreak(rec);
+    rec.updatedAt = new Date().toISOString();
+    store[rec.uid] = rec;
+    saveStudentStore(store);
+
+    const after = sanitizeStudentProfile(rec, likesCount);
+    const newlyUnlockedBadges = after.badges.filter((id) => !before.badges.includes(id));
+    const newlyUnlockedTrophies = after.trophies.filter((id) => !before.trophies.includes(id));
+
+    try {
+      await adminDb.collection('users').doc(rec.uid).set(
+        {
+          ...after,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // Non-blocking Firestore sync
+    }
+
+    res.json({
+      profile: after,
+      checkedInToday: true,
+      alreadyCheckedIn: check.alreadyCheckedIn,
+      newlyUnlocked: {
+        badges: newlyUnlockedBadges,
+        trophies: newlyUnlockedTrophies,
+      },
+    });
+  });
+
   // Student Learning Sync Endpoints (Progress, Bookmarks, Notes, Quiz Attempts)
-  app.post('/api/student/learning/progress', (req: Request, res: Response) => {
+  app.post('/api/student/learning/progress', async (req: Request, res: Response) => {
     const stuUser = resolveStudentCookie(req);
     if (!stuUser) {
       res.status(401).json({ error: 'Unlock student profile first.' });
@@ -2112,6 +2489,14 @@ Constraints for "objects":
     const now = new Date().toISOString();
     const idx = rec.progressList.findIndex((p) => p.lessonId === lessonId);
     const existing = idx >= 0 ? rec.progressList[idx] : null;
+    const wasCompleted = Boolean(existing?.completed);
+    const nextCompleted = typeof completed === 'boolean' ? completed : wasCompleted;
+
+    if (nextCompleted && !wasCompleted) {
+      rec.xp = Number(rec.xp || 50) + 60;
+    }
+    applyDailyStreak(rec);
+
     const item = {
       progressId,
       studentId: rec.uid,
@@ -2119,14 +2504,31 @@ Constraints for "objects":
       classId: classId || '',
       subjectId: subjectId || '',
       chapterId: chapterId || '',
-      completed: typeof completed === 'boolean' ? completed : Boolean(existing?.completed),
-      completedAt: completed ? now : existing?.completedAt,
+      completed: nextCompleted,
+      completedAt: nextCompleted ? existing?.completedAt || now : existing?.completedAt,
       lastViewedAt: now,
     };
     if (idx >= 0) rec.progressList[idx] = item;
     else rec.progressList.unshift(item);
+    rec.updatedAt = now;
     saveStudentStore(store);
-    res.json({ progressList: rec.progressList });
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+    const sanitized = sanitizeStudentProfile(rec, likesCount);
+
+    try {
+      await adminDb.collection('users').doc(rec.uid).set(
+        {
+          ...sanitized,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // Non-blocking Firestore sync
+    }
+
+    res.json({ progressList: rec.progressList, profile: sanitized });
   });
 
   app.post('/api/student/learning/bookmark', (req: Request, res: Response) => {
@@ -2208,7 +2610,7 @@ Constraints for "objects":
     res.json({ notes: rec.notes });
   });
 
-  app.post('/api/student/learning/quiz-attempt', (req: Request, res: Response) => {
+  app.post('/api/student/learning/quiz-attempt', async (req: Request, res: Response) => {
     const stuUser = resolveStudentCookie(req);
     if (!stuUser) {
       res.status(401).json({ error: 'Unlock student profile first.' });
@@ -2221,23 +2623,40 @@ Constraints for "objects":
       return;
     }
     const { quizId, lessonId, score, totalQuestions } = req.body || {};
+    const numericScore = Number(score || 0);
+    rec.xp = Number(rec.xp || 50) + 20 + numericScore * 15;
+    applyDailyStreak(rec);
     rec.quizAttempts.unshift({
       attemptId: `att_${crypto.randomBytes(6).toString('hex')}`,
       studentId: rec.uid,
       quizId,
       lessonId,
-      score: Number(score || 0),
+      score: numericScore,
       totalQuestions: Number(totalQuestions || 1),
       completedAt: new Date().toISOString(),
     });
     saveStudentStore(store);
-    res.json({ quizAttempts: rec.quizAttempts });
+    const overrides = loadContentOverrides();
+    const likesCount = (overrides.profileLikes[rec.uid] || []).length;
+    const sanitized = sanitizeStudentProfile(rec, likesCount);
+    try {
+      await adminDb.collection('users').doc(rec.uid).set(
+        {
+          ...sanitized,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // Non-blocking
+    }
+    res.json({ quizAttempts: rec.quizAttempts, profile: sanitized });
   });
 
-  // Admin: Content Save & Delete (works cleanly in Preview & syncs to Firestore when available)
+  // Admin: Content Save & Delete (works cleanly in Preview & syncs to Firestore + auto-generates AI MCQs & CQs for lessons)
   app.post('/api/admin/content/save', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const { collection: colName, idField, item } = req.body || {};
+      const { collection: colName, idField, item, autoGeneratePractice = true } = req.body || {};
       const allowedCols = ['categories', 'classes', 'subjects', 'chapters', 'topics', 'lessons', 'resources', 'quizzes', 'announcements', 'appSettings'];
       if (!allowedCols.includes(colName) || !item || typeof item !== 'object') {
         res.status(400).json({ error: 'Valid collection and item payload required.' });
@@ -2274,8 +2693,8 @@ Constraints for "objects":
               ...item,
               chapterId: String(item.chapterId || '').trim() || 'general',
               topicId: String(item.topicId || '').trim() || 'general',
-              category: String(item.category || '').trim() || 'interactive_3d',
-              youtubeUrl: String(item.youtubeUrl || '').trim() || 'demo://trigonometry-3d',
+              category: String(item.category || '').trim() || 'basic_to_pro',
+              youtubeUrl: String(item.youtubeUrl || '').trim(),
               titleBn: String(item.titleBn || '').trim() || String(item.title || ''),
               difficulty: item.difficulty || 'intermediate',
               order: Number(item.order || 1),
@@ -2297,6 +2716,30 @@ Constraints for "objects":
         timestamp: now,
       });
       overrides.activityLogs = overrides.activityLogs.slice(0, 40);
+
+      let generatedQuiz: Record<string, unknown> | null = null;
+      if (colName === 'lessons' && autoGeneratePractice !== false) {
+        const existingQuiz = Object.values(overrides.upserts.quizzes || {}).find((q) => q.lessonId === id);
+        if (!existingQuiz) {
+          try {
+            const aiPractice = await generateLessonPracticeWithAi({
+              lessonId: id,
+              title: String(cleanItem.title || ''),
+              description: String(cleanItem.description || ''),
+              classId: String(cleanItem.classId || ''),
+              subjectId: String(cleanItem.subjectId || ''),
+            });
+            if (aiPractice) {
+              if (!overrides.upserts.quizzes) overrides.upserts.quizzes = {};
+              overrides.upserts.quizzes![aiPractice.quizId] = aiPractice as unknown as Record<string, unknown>;
+              generatedQuiz = aiPractice as unknown as Record<string, unknown>;
+            }
+          } catch {
+            // Do not fail lesson publishing if AI practice generation hits rate limits
+          }
+        }
+      }
+
       saveContentOverrides(overrides);
 
       try {
@@ -2304,11 +2747,17 @@ Constraints for "objects":
           { ...cleanItem, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() },
           { merge: true }
         );
+        if (generatedQuiz && typeof generatedQuiz.quizId === 'string') {
+          await adminDb.collection('quizzes').doc(generatedQuiz.quizId).set(
+            { ...generatedQuiz, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() },
+            { merge: true }
+          );
+        }
       } catch {
         // Best-effort Firestore sync
       }
 
-      res.json({ ok: true, id, item: cleanItem });
+      res.json({ ok: true, id, item: cleanItem, generatedQuiz });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to save item.' });
     }
@@ -2424,6 +2873,7 @@ Constraints for "objects":
       const uid = `stu_${crypto.randomBytes(8).toString('hex')}`;
       const studentId = `ASA-${crypto.randomInt(1000, 9999)}`;
       const now = new Date().toISOString();
+      const today = getDhakaDateStr(0);
       const rec: StoredStudentRecord = {
         uid,
         studentId,
@@ -2435,6 +2885,9 @@ Constraints for "objects":
         accountStatus: 'active',
         dailyGoalMinutes: 45,
         streakDays: 1,
+        lastActiveDate: today,
+        streakHistory: [today],
+        xp: 50,
         passcodeKey,
         passwordHash: await bcrypt.hash(cleanPass, 10),
         createdAt: now,
@@ -2480,8 +2933,7 @@ Constraints for "objects":
 
       const response = await generateWithRetry('gemini-4-hydrogen', {
         contents: `You are an academic curriculum designer for Bangladeshi Class 6-10 students (${classTitle}, ${subjectTitle}).
-Create structured bilingual (English + natural Unicode Bangla) metadata and a 3-question MCQ quiz for this topic: "${String(topicPrompt).trim()}".
-Pick the most relevant 3D scene from ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom'] and whether 3D mode fits nicely (has3dMode).`,
+Create structured bilingual (English + natural Unicode Bangla) metadata and a 3-question MCQ quiz for this topic: "${String(topicPrompt).trim()}".`,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
@@ -2493,8 +2945,6 @@ Pick the most relevant 3D scene from ['trigonometry_triangle', 'newton_orbit', '
               descriptionBn: { type: Type.STRING },
               difficulty: { type: Type.STRING },
               durationMinutes: { type: Type.INTEGER },
-              has3dMode: { type: Type.BOOLEAN },
-              threeDSceneType: { type: Type.STRING },
               objectives: { type: Type.ARRAY, items: { type: Type.STRING } },
               questions: {
                 type: Type.ARRAY,
@@ -2513,7 +2963,7 @@ Pick the most relevant 3D scene from ['trigonometry_triangle', 'newton_orbit', '
                 },
               },
             },
-            required: ['title', 'titleBn', 'description', 'descriptionBn', 'difficulty', 'durationMinutes', 'has3dMode', 'threeDSceneType', 'objectives', 'questions'],
+            required: ['title', 'titleBn', 'description', 'descriptionBn', 'difficulty', 'durationMinutes', 'objectives', 'questions'],
           },
         },
       });
@@ -2541,7 +2991,7 @@ Pick the most relevant 3D scene from ['trigonometry_triangle', 'newton_orbit', '
 
       const response = await generateWithRetry('gemini-4-hydrogen', {
         contents: `Create a complete mini learning module for ${classId} (${subjectId}) based on: "${String(prompt).trim()}".
-Include bilingual English & natural Unicode Bangla titles/descriptions for 1 chapter, 1 topic, 1 lesson (with a realistic 3D scene type from ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom']), and 3 MCQ quiz questions.`,
+Include bilingual English & natural Unicode Bangla titles/descriptions for 1 chapter, 1 topic, 1 lesson, and 3 MCQ quiz questions.`,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
@@ -2558,7 +3008,6 @@ Include bilingual English & natural Unicode Bangla titles/descriptions for 1 cha
               lessonDesc: { type: Type.STRING },
               lessonDescBn: { type: Type.STRING },
               difficulty: { type: Type.STRING },
-              threeDSceneType: { type: Type.STRING },
               objectives: { type: Type.ARRAY, items: { type: Type.STRING } },
               questions: {
                 type: Type.ARRAY,
@@ -2577,7 +3026,7 @@ Include bilingual English & natural Unicode Bangla titles/descriptions for 1 cha
                 },
               },
             },
-            required: ['chapterTitle', 'chapterTitleBn', 'topicTitle', 'topicTitleBn', 'lessonTitle', 'lessonTitleBn', 'lessonDesc', 'lessonDescBn', 'difficulty', 'threeDSceneType', 'questions'],
+            required: ['chapterTitle', 'chapterTitleBn', 'topicTitle', 'topicTitleBn', 'lessonTitle', 'lessonTitleBn', 'lessonDesc', 'lessonDescBn', 'difficulty', 'questions'],
           },
         },
       });
@@ -2615,27 +3064,22 @@ Include bilingual English & natural Unicode Bangla titles/descriptions for 1 cha
         createdAt: now,
         updatedAt: now,
       };
-      const validScenes = ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom'];
-      const scene = validScenes.includes(gen.threeDSceneType) ? gen.threeDSceneType : 'algebra_geometry';
-      const demoUrl = scene === 'newton_orbit' ? 'demo://newton-orbit-3d' : scene === 'molecule_atom' ? 'demo://atom-3d' : 'demo://trigonometry-3d';
       const lesson = {
         lessonId,
         classId,
         subjectId,
         chapterId,
         topicId,
-        category: 'interactive_3d',
+        category: 'basic_to_pro',
         title: gen.lessonTitle,
         titleBn: gen.lessonTitleBn || gen.lessonTitle,
-        youtubeUrl: demoUrl,
+        youtubeUrl: '',
         description: gen.lessonDesc,
         descriptionBn: gen.lessonDescBn || gen.lessonDesc,
         objectives: Array.isArray(gen.objectives) ? gen.objectives : [],
         difficulty: ['beginner', 'intermediate', 'advanced'].includes(gen.difficulty) ? gen.difficulty : 'intermediate',
         durationMinutes: 15,
         featured: true,
-        has3dMode: true,
-        threeDSceneType: scene,
         order: 1,
         status: 'published',
         createdAt: now,
@@ -2680,7 +3124,7 @@ Include bilingual English & natural Unicode Bangla titles/descriptions for 1 cha
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

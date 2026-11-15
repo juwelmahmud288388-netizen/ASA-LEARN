@@ -4,24 +4,22 @@ import {
   ArrowRight,
   Bookmark,
   Bot,
-  Box,
   CheckCircle2,
-  Columns2,
+  ChevronDown,
+  ChevronUp,
   Download,
   FileText,
+  HelpCircle,
+  Loader2,
   Maximize2,
   MonitorPlay,
-  Play,
   RotateCcw,
   Save,
+  Sparkles,
 } from 'lucide-react';
-import { DemoVideoPlayer } from '../components/DemoVideoPlayer';
-import { Interactive3DLab } from '../components/Interactive3DLab';
 import { useApp } from '../context/AppContext';
 import { t } from '../i18n/translations';
 import { getYouTubeEmbedUrl } from '../lib/utils';
-
-type ViewMode = 'video' | '3d' | 'split';
 
 export const LessonPlayerPage: React.FC = () => {
   const {
@@ -40,18 +38,19 @@ export const LessonPlayerPage: React.FC = () => {
     progressList,
     bookmarks,
     notes,
+    refreshCurriculum,
     toggleLessonComplete,
     recordLessonView,
     toggleBookmark,
     saveNote,
     recordQuizAttempt,
     openAiWithLesson,
+    openStudentModal,
   } = useApp();
 
   const lessonId = route.replace(/^\/lesson\//, '').split('/')[0];
   const lesson = lessons.find((l) => l.lessonId === lessonId);
 
-  const [viewMode, setViewMode] = useState<ViewMode>(lesson?.has3dMode ? 'split' : 'video');
   const [theaterMode, setTheaterMode] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -59,10 +58,13 @@ export const LessonPlayerPage: React.FC = () => {
 
   const hasStudentAccess = Boolean(userProfile?.uid || firebaseUser?.uid);
 
-  // Quiz State
+  // Quiz & Creative Questions State
   const lessonQuiz = quizzes.find((q) => q.lessonId === lessonId);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
+  const [openCqAnswers, setOpenCqAnswers] = useState<Record<string, boolean>>({});
+  const [practiceBusy, setPracticeBusy] = useState(false);
+  const [practiceError, setPracticeError] = useState<string | null>(null);
 
   // Personal Notepad State
   const existingNote = useMemo(() => notes.find((n) => n.lessonId === lessonId), [notes, lessonId]);
@@ -70,10 +72,6 @@ export const LessonPlayerPage: React.FC = () => {
   const [noteContent, setNoteContent] = useState('');
   const [savingNote, setSavingNote] = useState(false);
   const [noteSavedNotice, setNoteSavedNotice] = useState(false);
-
-  useEffect(() => {
-    setViewMode(lesson?.has3dMode ? 'split' : 'video');
-  }, [lessonId, lesson?.has3dMode]);
 
   useEffect(() => {
     if (existingNote) {
@@ -85,6 +83,8 @@ export const LessonPlayerPage: React.FC = () => {
     }
     setAnswers({});
     setQuizSubmitted(false);
+    setOpenCqAnswers({});
+    setPracticeError(null);
   }, [lessonId, existingNote?.noteId]);
 
   useEffect(() => {
@@ -125,9 +125,9 @@ export const LessonPlayerPage: React.FC = () => {
   const isCompleted = progressList.some((p) => p.lessonId === lesson.lessonId && p.completed);
   const isBookmarked = bookmarks.some((b) => b.itemId === lesson.lessonId && b.itemType === 'lesson');
 
-  const isDemoUri = lesson.youtubeUrl.startsWith('demo://');
-  const isDirectVideo = /\.(mp4|webm|ogg)(\?.*)?$/i.test(lesson.youtubeUrl);
-  const embedUrl = !isDemoUri && !isDirectVideo ? getYouTubeEmbedUrl(lesson.youtubeUrl) : '';
+  const cleanUrl = (lesson.youtubeUrl || '').trim();
+  const isDirectVideo = /\.(mp4|webm|ogg)(\?.*)?$/i.test(cleanUrl);
+  const embedUrl = cleanUrl && !isDirectVideo ? getYouTubeEmbedUrl(cleanUrl) : '';
 
   const applyPlaybackRate = (rate: number) => {
     setPlaybackRate(rate);
@@ -147,6 +147,35 @@ export const LessonPlayerPage: React.FC = () => {
     }
   };
 
+  const handleGenerateAiPractice = async () => {
+    setPracticeBusy(true);
+    setPracticeError(null);
+    try {
+      const res = await fetch('/api/ai/lesson-practice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          lessonId: lesson.lessonId,
+          title: lesson.title,
+          description: lesson.description || lesson.descriptionBn || '',
+          classId: cls?.title || lesson.classId,
+          subjectId: subj?.title || lesson.subjectId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not generate AI practice questions.');
+      setAnswers({});
+      setQuizSubmitted(false);
+      setOpenCqAnswers({});
+      await refreshCurriculum();
+    } catch (err) {
+      setPracticeError(err instanceof Error ? err.message : 'AI practice generation failed.');
+    } finally {
+      setPracticeBusy(false);
+    }
+  };
+
   const handleQuizSubmit = async () => {
     if (!lessonQuiz) return;
     let correct = 0;
@@ -161,7 +190,7 @@ export const LessonPlayerPage: React.FC = () => {
 
   const handleSaveNote = async () => {
     if (!hasStudentAccess) {
-      navigate('/login');
+      openStudentModal('create');
       return;
     }
     setSavingNote(true);
@@ -185,21 +214,8 @@ export const LessonPlayerPage: React.FC = () => {
     : 0;
 
   const renderVideoBox = () => {
-    if (isDemoUri) {
-      return (
-        <DemoVideoPlayer
-          demoUri={lesson.youtubeUrl}
-          title={language === 'bn' ? lesson.titleBn : lesson.title}
-          language={language}
-          playbackRate={playbackRate}
-          onFullscreen={handleFullscreen}
-        />
-      );
-    }
     if (isDirectVideo) {
-      return (
-        <video controls src={lesson.youtubeUrl} className="h-full w-full object-contain bg-black" />
-      );
+      return <video controls src={cleanUrl} className="h-full w-full bg-black object-contain" />;
     }
     if (embedUrl) {
       return (
@@ -214,13 +230,17 @@ export const LessonPlayerPage: React.FC = () => {
       );
     }
     return (
-      <DemoVideoPlayer
-        demoUri="demo://trigonometry-3d"
-        title={language === 'bn' ? lesson.titleBn : lesson.title}
-        language={language}
-        playbackRate={playbackRate}
-        onFullscreen={handleFullscreen}
-      />
+      <div className="flex h-full w-full flex-col items-center justify-center bg-[#091332] px-6 text-center text-white">
+        <FileText className="mb-3 h-10 w-10 text-[#BFE8FF]" />
+        <p className="font-display text-base font-bold">
+          {language === 'bn' ? lesson.titleBn || lesson.title : lesson.title}
+        </p>
+        <p className="mt-1 max-w-md text-xs text-slate-300">
+          {language === 'bn'
+            ? 'এই পাঠের ভিডিও এখনো যুক্ত হয়নি। নিচের স্টাডি নোট, PDF ও MCQ অনুশীলন করুন।'
+            : 'Video lecture not uploaded yet — study notes, PDF resources, and practice quizzes are ready below.'}
+        </p>
+      </div>
     );
   };
 
@@ -259,7 +279,7 @@ export const LessonPlayerPage: React.FC = () => {
             onClick={() =>
               hasStudentAccess
                 ? void toggleBookmark(lesson.lessonId, 'lesson', language === 'bn' ? lesson.titleBn : lesson.title)
-                : navigate('/login')
+                : openStudentModal('create')
             }
             className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
               isBookmarked
@@ -274,7 +294,7 @@ export const LessonPlayerPage: React.FC = () => {
           <button
             type="button"
             onClick={() =>
-              hasStudentAccess ? void toggleLessonComplete(lesson, !isCompleted) : navigate('/login')
+              hasStudentAccess ? void toggleLessonComplete(lesson, !isCompleted) : openStudentModal('create')
             }
             className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition ${
               isCompleted
@@ -288,87 +308,14 @@ export const LessonPlayerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Interactive Mode Switcher: Video | 3D Mode | Split View */}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-2xl border border-[#172554]/10 bg-white/80 p-1 backdrop-blur-md dark:border-white/10 dark:bg-slate-900/80">
-          <button
-            type="button"
-            onClick={() => setViewMode('video')}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition ${
-              viewMode === 'video'
-                ? 'bg-[#172554] text-white dark:bg-[#BFE8FF] dark:text-[#172554]'
-                : 'text-[#64748B] hover:text-[#172554] dark:text-slate-300'
-            }`}
-          >
-            <Play className="h-3.5 w-3.5" />
-            <span>{language === 'bn' ? 'ভিডিও ক্লাস' : 'Video Mode'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setViewMode('3d')}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition ${
-              viewMode === '3d'
-                ? 'bg-[#172554] text-white dark:bg-[#BFE8FF] dark:text-[#172554]'
-                : 'text-[#64748B] hover:text-[#172554] dark:text-slate-300'
-            }`}
-          >
-            <Box className="h-3.5 w-3.5" />
-            <span>{language === 'bn' ? 'থ্রিডি (3D) মোড' : '3D Mode'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setViewMode('split')}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-semibold transition ${
-              viewMode === 'split'
-                ? 'bg-[#172554] text-white dark:bg-[#BFE8FF] dark:text-[#172554]'
-                : 'text-[#64748B] hover:text-[#172554] dark:text-slate-300'
-            }`}
-          >
-            <Columns2 className="h-3.5 w-3.5" />
-            <span>{language === 'bn' ? 'ভিডিও + থ্রিডি একসাথে' : 'Split View'}</span>
-          </button>
-        </div>
-
-        <span className="text-xs font-medium text-[#64748B] dark:text-slate-400">
-          {language === 'bn'
-            ? 'ড্র্যাগ করে থ্রিডি মডেল ঘুরান ও স্লাইডার দিয়ে মান পরিবর্তন করুন'
-            : 'Drag to orbit 3D model · Adjust sliders to test physics & math'}
-        </span>
-      </div>
-
       {/* Main Grid */}
-      <div className={`mt-4 grid grid-cols-1 gap-6 ${theaterMode || viewMode === 'split' ? 'lg:grid-cols-1' : 'lg:grid-cols-12'}`}>
-        {/* Video & 3D Viewport */}
-        <div className={theaterMode || viewMode === 'split' ? 'w-full' : 'lg:col-span-8'}>
+      <div className={`mt-4 grid grid-cols-1 gap-6 ${theaterMode ? 'lg:grid-cols-1' : 'lg:grid-cols-12'}`}>
+        {/* Clean 16:9 Video Viewport & Details */}
+        <div className={theaterMode ? 'w-full' : 'lg:col-span-8'}>
           <div ref={playerContainerRef} className="glass-surface overflow-hidden rounded-3xl p-2">
-            {viewMode === 'split' ? (
-              <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-                <div className="aspect-video w-full overflow-hidden rounded-2xl bg-slate-950">
-                  {renderVideoBox()}
-                </div>
-                <div className="aspect-video w-full overflow-hidden rounded-2xl bg-[#091332]">
-                  <Interactive3DLab
-                    initialScene={lesson.threeDSceneType || 'trigonometry_triangle'}
-                    language={language}
-                    onAskAi={() => openAiWithLesson(lesson, 'visual_3d_guide')}
-                  />
-                </div>
-              </div>
-            ) : viewMode === '3d' ? (
-              <div className="h-[360px] sm:h-[460px] w-full overflow-hidden rounded-2xl bg-[#091332]">
-                <Interactive3DLab
-                  initialScene={lesson.threeDSceneType || 'trigonometry_triangle'}
-                  language={language}
-                  onAskAi={() => openAiWithLesson(lesson, 'visual_3d_guide')}
-                />
-              </div>
-            ) : (
-              <div className="aspect-video w-full overflow-hidden rounded-2xl bg-slate-950">
-                {renderVideoBox()}
-              </div>
-            )}
+            <div className="aspect-video w-full overflow-hidden rounded-2xl bg-slate-950">
+              {renderVideoBox()}
+            </div>
 
             {/* Player Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 text-xs">
@@ -391,14 +338,16 @@ export const LessonPlayerPage: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleFullscreen}
-                  className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium text-[#172033] hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-slate-800"
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                  <span>Fullscreen</span>
-                </button>
+                {embedUrl && (
+                  <button
+                    type="button"
+                    onClick={handleFullscreen}
+                    className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium text-[#172033] hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    <Maximize2 className="h-3.5 w-3.5" />
+                    <span>Fullscreen</span>
+                  </button>
+                )}
                 {prevLesson && (
                   <button
                     type="button"
@@ -423,7 +372,34 @@ export const LessonPlayerPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Lesson Details */}
+          {/* Ask a Doubt Banner */}
+          <div className="glass-surface mt-5 flex flex-wrap items-center justify-between gap-3 rounded-3xl p-4 sm:px-6">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#172554] text-[#BFE8FF]">
+                <HelpCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="font-display text-sm font-bold text-[#172033] dark:text-white">
+                  {language === 'bn' ? 'কোনো অংশ বুঝতে সমস্যা হচ্ছে?' : 'Stuck on a concept or formula?'}
+                </p>
+                <p className="text-xs text-[#64748B] dark:text-slate-400">
+                  {language === 'bn'
+                    ? 'আপনার পাঠ অনুযায়ী AI টিউটরকে যেকোনো প্রশ্ন করুন ও PDF লিংক পান'
+                    : 'Ask a doubt right now — AI Tutor loads this lesson context automatically'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => openAiWithLesson(lesson, 'bangla_tutor')}
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
+            >
+              <Bot className="h-4 w-4" />
+              <span>{language === 'bn' ? 'সন্দেহ জিজ্ঞাসা করুন (Ask AI)' : 'Ask AI Tutor'}</span>
+            </button>
+          </div>
+
+          {/* Lesson Details & Direct PDF Links (no overlay) */}
           <div className="glass-surface mt-6 rounded-3xl p-6 sm:p-7">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-xs font-medium text-[#263B91] dark:text-[#BFE8FF]">
@@ -433,8 +409,8 @@ export const LessonPlayerPage: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => openAiWithLesson(lesson, lesson.has3dMode ? 'visual_3d_guide' : 'bangla_tutor')}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#E7F5FF] px-3.5 py-2 text-xs font-semibold text-[#172554] transition hover:bg-[#BFE8FF] dark:bg-slate-800 dark:text-[#BFE8FF]"
+                onClick={() => openAiWithLesson(lesson, 'bangla_tutor')}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#E7F5FF] px-3.5 py-2 text-xs font-semibold text-[#172554] transition hover:bg-[#BFE8FF] dark:bg-slate-800 dark:text-[#BFE8FF]"
               >
                 <Bot className="h-4 w-4" />
                 <span>{t(language, 'askAiAboutLesson')}</span>
@@ -464,7 +440,7 @@ export const LessonPlayerPage: React.FC = () => {
               </div>
             )}
 
-            {/* Resources */}
+            {/* Direct Resources / PDFs */}
             {lessonResources.length > 0 && (
               <div className="mt-6 border-t border-[#172554]/10 pt-5 dark:border-white/10">
                 <h2 className="font-display text-sm font-bold text-[#172033] dark:text-white">
@@ -493,7 +469,7 @@ export const LessonPlayerPage: React.FC = () => {
                           className="inline-flex items-center gap-1.5 rounded-lg bg-[#172554] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
                         >
                           <Download className="h-3.5 w-3.5" />
-                          <span>PDF</span>
+                          <span>{language === 'bn' ? 'খুলুন' : 'Open PDF'}</span>
                         </a>
                       )}
                     </div>
@@ -503,97 +479,235 @@ export const LessonPlayerPage: React.FC = () => {
             )}
           </div>
 
-          {/* Interactive MCQ Quiz */}
-          {lessonQuiz && lessonQuiz.questions.length > 0 && (
-            <div className="glass-surface mt-6 rounded-3xl p-6 sm:p-7">
-              <div className="flex items-center justify-between">
-                <h2 className="font-display text-xl font-bold text-[#172033] dark:text-white">
-                  {t(language, 'mcqQuiz')}
+          {/* AI-Generated Practice Lab (MCQs + Creative Questions) */}
+          <div className="glass-surface mt-6 rounded-3xl p-6 sm:p-7">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[#263B91] dark:text-[#BFE8FF]">
+                  {language === 'bn' ? 'AI-জেনারেটেড প্র্যাকটিস সেশন' : 'AI-Generated Practice'}
+                </p>
+                <h2 className="font-display mt-0.5 text-xl font-bold text-[#172033] dark:text-white">
+                  {language === 'bn' ? 'MCQ ও সৃজনশীল/সংক্ষিপ্ত প্রশ্ন (CQ)' : 'MCQs & Creative Questions (CQ)'}
                 </h2>
-                {quizSubmitted && (
-                  <span className="font-mono-nums text-sm font-bold text-[#172554] dark:text-[#BFE8FF]">
-                    Score: {quizScore} / {lessonQuiz.questions.length}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {quizSubmitted && lessonQuiz && (
+                  <span className="font-mono-nums rounded-xl bg-emerald-100 px-3 py-1.5 text-xs font-bold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-200">
+                    {language === 'bn' ? 'স্কোর' : 'Score'}: {quizScore} / {lessonQuiz.questions.length}
                   </span>
                 )}
-              </div>
-
-              <div className="mt-5 space-y-6">
-                {lessonQuiz.questions.map((q, qIdx) => {
-                  const qText = language === 'bn' && q.questionBn ? q.questionBn : q.question;
-                  const opts = language === 'bn' && q.optionsBn ? q.optionsBn : q.options;
-                  const chosen = answers[q.id];
-                  return (
-                    <div key={q.id} className="border-b border-[#172554]/10 pb-5 last:border-b-0 last:pb-0 dark:border-white/10">
-                      <p className="text-sm font-semibold text-[#172033] dark:text-white">
-                        {qIdx + 1}. {qText}
-                      </p>
-                      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        {opts.map((opt, oIdx) => {
-                          const isSelected = chosen === oIdx;
-                          const isCorrect = q.correctIndex === oIdx;
-                          let style =
-                            'border-[#172554]/10 bg-white/80 text-[#172033] hover:bg-[#E7F5FF] dark:border-white/10 dark:bg-slate-800/75 dark:text-slate-100';
-                          if (quizSubmitted) {
-                            if (isCorrect) style = 'border-emerald-600 bg-emerald-50 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200';
-                            else if (isSelected && !isCorrect)
-                              style = 'border-red-500 bg-red-50 text-red-900 dark:bg-red-950/60 dark:text-red-200';
-                          } else if (isSelected) {
-                            style = 'border-[#172554] bg-[#172554] text-white dark:border-[#BFE8FF] dark:bg-[#BFE8FF] dark:text-[#172554]';
-                          }
-
-                          return (
-                            <button
-                              key={oIdx}
-                              type="button"
-                              disabled={quizSubmitted}
-                              onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: oIdx }))}
-                              className={`rounded-xl border px-4 py-2.5 text-left text-xs font-medium transition ${style}`}
-                            >
-                              {opt}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {quizSubmitted && (
-                        <p className="mt-2.5 text-xs text-[#64748B] dark:text-slate-300">
-                          {language === 'bn' && q.explanationBn ? q.explanationBn : q.explanation}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-6 flex items-center gap-3">
-                {!quizSubmitted ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleQuizSubmit()}
-                    className="rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
-                  >
-                    {t(language, 'startQuiz')}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAnswers({});
-                      setQuizSubmitted(false);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-[#172554]/20 px-4 py-2 text-xs font-semibold text-[#172554] dark:border-white/20 dark:text-[#BFE8FF]"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    <span>{t(language, 'retryQuiz')}</span>
-                  </button>
-                )}
+                <button
+                  type="button"
+                  disabled={practiceBusy}
+                  onClick={() => void handleGenerateAiPractice()}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border border-[#172554]/20 bg-white/85 px-4 py-2 text-xs font-semibold text-[#172554] transition hover:bg-[#E7F5FF] disabled:opacity-50 dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
+                >
+                  {practiceBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  <span>
+                    {practiceBusy
+                      ? language === 'bn'
+                        ? 'AI তৈরি করছে...'
+                        : 'Generating...'
+                      : lessonQuiz
+                        ? language === 'bn'
+                          ? 'নতুন AI প্রশ্ন তৈরি করুন'
+                          : 'Refresh AI Practice'
+                        : language === 'bn'
+                          ? 'AI প্র্যাকটিস তৈরি করুন'
+                          : 'Generate AI Practice'}
+                  </span>
+                </button>
               </div>
             </div>
-          )}
+
+            {practiceError && (
+              <div className="mt-4 rounded-xl border border-red-500/25 bg-red-50 px-3.5 py-2.5 text-xs text-red-700 dark:bg-red-950/50 dark:text-red-200">
+                {practiceError}
+              </div>
+            )}
+
+            {!lessonQuiz || (lessonQuiz.questions.length === 0 && (!lessonQuiz.creativeQuestions || lessonQuiz.creativeQuestions.length === 0)) ? (
+              <div className="mt-5 rounded-2xl border border-dashed border-[#172554]/20 p-6 text-center dark:border-white/15">
+                <p className="text-sm text-[#64748B] dark:text-slate-300">
+                  {language === 'bn'
+                    ? 'এই ক্লাসের জন্য স্বয়ংক্রিয় MCQ ও সৃজনশীল প্রশ্ন তৈরি করতে উপরের "AI প্র্যাকটিস তৈরি করুন" বাটনে ক্লিক করুন।'
+                    : 'Click "Generate AI Practice" above to create instant bilingual MCQs and Creative Questions (CQ) for this lesson.'}
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Part A: Instant Scoring MCQs */}
+                {lessonQuiz.questions.length > 0 && (
+                  <div className="mt-5">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                      {t(language, 'mcqQuiz')} ({lessonQuiz.questions.length})
+                    </h3>
+                    <div className="mt-4 space-y-6">
+                      {lessonQuiz.questions.map((q, qIdx) => {
+                        const qText = language === 'bn' && q.questionBn ? q.questionBn : q.question;
+                        const opts = language === 'bn' && q.optionsBn ? q.optionsBn : q.options;
+                        const chosen = answers[q.id];
+                        return (
+                          <div
+                            key={q.id}
+                            className="border-b border-[#172554]/10 pb-5 last:border-b-0 last:pb-0 dark:border-white/10"
+                          >
+                            <p className="text-sm font-semibold text-[#172033] dark:text-white">
+                              {qIdx + 1}. {qText}
+                            </p>
+                            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              {opts.map((opt, oIdx) => {
+                                const isSelected = chosen === oIdx;
+                                const isCorrect = q.correctIndex === oIdx;
+                                let style =
+                                  'border-[#172554]/10 bg-white/80 text-[#172033] hover:bg-[#E7F5FF] dark:border-white/10 dark:bg-slate-800/75 dark:text-slate-100';
+                                if (quizSubmitted) {
+                                  if (isCorrect)
+                                    style =
+                                      'border-emerald-600 bg-emerald-50 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200';
+                                  else if (isSelected && !isCorrect)
+                                    style =
+                                      'border-red-500 bg-red-50 text-red-900 dark:bg-red-950/60 dark:text-red-200';
+                                } else if (isSelected) {
+                                  style =
+                                    'border-[#172554] bg-[#172554] text-white dark:border-[#BFE8FF] dark:bg-[#BFE8FF] dark:text-[#172554]';
+                                }
+
+                                return (
+                                  <button
+                                    key={oIdx}
+                                    type="button"
+                                    disabled={quizSubmitted}
+                                    onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: oIdx }))}
+                                    className={`min-h-[44px] rounded-xl border px-4 py-2.5 text-left text-xs font-medium transition ${style}`}
+                                  >
+                                    {opt}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {quizSubmitted && (
+                              <p className="mt-2.5 text-xs text-[#64748B] dark:text-slate-300">
+                                {language === 'bn' && q.explanationBn ? q.explanationBn : q.explanation}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      {!quizSubmitted ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleQuizSubmit()}
+                          className="min-h-[44px] rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
+                        >
+                          {t(language, 'startQuiz')}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAnswers({});
+                            setQuizSubmitted(false);
+                          }}
+                          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#172554]/20 px-4 py-2 text-xs font-semibold text-[#172554] dark:border-white/20 dark:text-[#BFE8FF]"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>{t(language, 'retryQuiz')}</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => openAiWithLesson(lesson, 'bangla_tutor')}
+                        className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-[#E7F5FF] px-4 py-2 text-xs font-semibold text-[#172554] hover:bg-[#BFE8FF] dark:bg-slate-800 dark:text-[#BFE8FF]"
+                      >
+                        <Bot className="h-4 w-4" />
+                        <span>{language === 'bn' ? 'প্রশ্ন নিয়ে সন্দেহ আছে?' : 'Ask a Doubt on Quiz'}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Part B: Creative & Short Questions */}
+                {lessonQuiz.creativeQuestions && lessonQuiz.creativeQuestions.length > 0 && (
+                  <div className="mt-8 border-t border-[#172554]/10 pt-6 dark:border-white/10">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-[#263B91] dark:text-[#BFE8FF]">
+                      {language === 'bn'
+                        ? 'সৃজনশীল ও সংক্ষিপ্ত প্রশ্ন (Creative Questions / CQ)'
+                        : 'Creative & Short Questions (CQ Practice)'}
+                    </h3>
+
+                    <div className="mt-4 space-y-4">
+                      {lessonQuiz.creativeQuestions.map((cq, cqIdx) => {
+                        const stem = language === 'bn' && cq.stemBn ? cq.stemBn : cq.stem;
+                        const subQs =
+                          language === 'bn' && cq.questionsBn && cq.questionsBn.length > 0
+                            ? cq.questionsBn
+                            : cq.questions;
+                        const answer = language === 'bn' && cq.modelAnswerBn ? cq.modelAnswerBn : cq.modelAnswer;
+                        const isOpen = Boolean(openCqAnswers[cq.id]);
+
+                        return (
+                          <div
+                            key={cq.id}
+                            className="rounded-2xl border border-[#172554]/10 bg-white/80 p-4 sm:p-5 dark:border-white/10 dark:bg-slate-800/70"
+                          >
+                            <p className="text-xs font-bold text-[#263B91] dark:text-[#BFE8FF]">
+                              {language === 'bn' ? `সৃজনশীল প্রশ্ন ${cqIdx + 1}` : `Creative Question ${cqIdx + 1}`}
+                            </p>
+                            <p className="mt-1.5 text-sm leading-relaxed text-[#172033] dark:text-white">{stem}</p>
+
+                            <ul className="mt-3 space-y-1.5 text-xs font-medium text-[#172033] dark:text-slate-200">
+                              {subQs.map((sq, sIdx) => (
+                                <li key={sIdx} className="leading-relaxed">
+                                  {sq}
+                                </li>
+                              ))}
+                            </ul>
+
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setOpenCqAnswers((prev) => ({ ...prev, [cq.id]: !prev[cq.id] }))
+                                }
+                                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[#172554]/15 bg-[#E7F5FF]/70 px-3.5 py-1.5 text-xs font-semibold text-[#172554] dark:border-white/15 dark:bg-slate-900 dark:text-[#BFE8FF]"
+                              >
+                                {isOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                                <span>
+                                  {isOpen
+                                    ? language === 'bn'
+                                      ? 'নমুনা উত্তর লুকান'
+                                      : 'Hide Model Answer'
+                                    : language === 'bn'
+                                      ? 'নমুনা উত্তর দেখুন'
+                                      : 'Show Model Answer'}
+                                </span>
+                              </button>
+                            </div>
+
+                            {isOpen && (
+                              <div className="mt-3 whitespace-pre-wrap rounded-xl bg-[#F5F9FF] p-3.5 text-xs leading-relaxed text-[#172033] dark:bg-slate-900/90 dark:text-slate-200">
+                                {answer}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Sidebar: Personal Notepad & Related Lessons */}
-        <div className={theaterMode || viewMode === 'split' ? 'grid grid-cols-1 gap-6 lg:grid-cols-2' : 'space-y-6 lg:col-span-4'}>
-          {/* Personal Digital Notepad */}
+        <div className={theaterMode ? 'grid grid-cols-1 gap-6 lg:grid-cols-2' : 'space-y-6 lg:col-span-4'}>
           <div className="glass-surface rounded-3xl p-6">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-base font-bold text-[#172033] dark:text-white">
@@ -609,8 +723,8 @@ export const LessonPlayerPage: React.FC = () => {
                   ? 'আপনার নোটগুলো আপনার প্রোফাইল পাসওয়ার্ডের অধীনে সুরক্ষিত থাকবে।'
                   : 'Saved privately to your passcode profile.'
                 : language === 'bn'
-                ? 'নোট সংরক্ষণ করতে পাসওয়ার্ড দিয়ে প্রোফাইল আনলক করুন।'
-                : 'Unlock your profile with a password to save notes.'}
+                  ? 'নোট সংরক্ষণ করতে পাসওয়ার্ড দিয়ে প্রোফাইল আনলক করুন।'
+                  : 'Unlock your profile with a password to save notes.'}
             </p>
 
             <input
@@ -640,7 +754,6 @@ export const LessonPlayerPage: React.FC = () => {
             </button>
           </div>
 
-          {/* Related Lessons */}
           <div className="glass-surface rounded-3xl p-6">
             <h2 className="font-display text-base font-bold text-[#172033] dark:text-white">
               {language === 'bn' ? 'সম্পর্কিত পাঠসমূহ' : 'Related Lessons'}
@@ -661,7 +774,13 @@ export const LessonPlayerPage: React.FC = () => {
                         {language === 'bn' ? rel.titleBn : rel.title}
                       </p>
                       <p className="mt-0.5 text-[11px] text-[#64748B] dark:text-slate-400">
-                        {rel.has3dMode ? (language === 'bn' ? 'ভিডিও + থ্রিডি মোড' : 'Video + 3D Mode') : rel.category}
+                        {rel.category === 'one_shot'
+                          ? language === 'bn'
+                            ? 'ওয়ান-শট রিভিশন'
+                            : 'One-Shot Revision'
+                          : language === 'bn'
+                            ? 'বেসিক থেকে প্রো'
+                            : 'Basic to Pro'}
                       </p>
                     </div>
                   </button>

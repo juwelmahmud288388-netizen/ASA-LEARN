@@ -60,7 +60,7 @@ service cloud.firestore {
     // Validation Helpers
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'studentId', 'fullName', 'classId', 'preferredLanguage', 'role', 'accountStatus', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'studentId', 'fullName', 'classId', 'preferredLanguage', 'preferredTheme', 'role', 'accountStatus', 'dailyGoalMinutes', 'streakDays', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'studentId', 'fullName', 'classId', 'preferredLanguage', 'preferredTheme', 'role', 'accountStatus', 'dailyGoalMinutes', 'streakDays', 'lastActiveDate', 'streakHistory', 'xp', 'likesCount', 'badges', 'trophies', 'activeBorder', 'unlockedBorders', 'createdAt', 'updatedAt'])
         && isValidId(data.uid)
         && isValidId(data.studentId)
         && isNonEmptyString(data.fullName, 120)
@@ -71,6 +71,14 @@ service cloud.firestore {
         && data.accountStatus in ['active', 'suspended']
         && (!('dailyGoalMinutes' in data) || (data.dailyGoalMinutes is int && data.dailyGoalMinutes >= 5 && data.dailyGoalMinutes <= 600))
         && (!('streakDays' in data) || (data.streakDays is int && data.streakDays >= 0 && data.streakDays <= 3650))
+        && (!('lastActiveDate' in data) || isOptionalString(data.lastActiveDate, 20))
+        && (!('streakHistory' in data) || (data.streakHistory is list && data.streakHistory.size() <= 40 && (data.streakHistory.size() == 0 || data.streakHistory[0] is string)))
+        && (!('xp' in data) || (data.xp is int && data.xp >= 0 && data.xp <= 10000000))
+        && (!('likesCount' in data) || (data.likesCount is int && data.likesCount >= 0 && data.likesCount <= 10000000))
+        && (!('activeBorder' in data) || isOptionalString(data.activeBorder, 64))
+        && (!('badges' in data) || (data.badges is list && data.badges.size() <= 30 && (data.badges.size() == 0 || data.badges[0] is string)))
+        && (!('trophies' in data) || (data.trophies is list && data.trophies.size() <= 30 && (data.trophies.size() == 0 || data.trophies[0] is string)))
+        && (!('unlockedBorders' in data) || (data.unlockedBorders is list && data.unlockedBorders.size() <= 20 && (data.unlockedBorders.size() == 0 || data.unlockedBorders[0] is string)))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -100,13 +108,15 @@ service cloud.firestore {
 
     function isValidSubject(data) {
       return data.keys().hasAll(['subjectId', 'classId', 'title', 'titleBn', 'order', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['subjectId', 'classId', 'title', 'titleBn', 'description', 'descriptionBn', 'order', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['subjectId', 'classId', 'title', 'titleBn', 'description', 'descriptionBn', 'groups', 'isOptional', 'order', 'status', 'createdAt', 'updatedAt'])
         && isValidId(data.subjectId)
         && isValidId(data.classId)
         && isNonEmptyString(data.title, 120)
         && isNonEmptyString(data.titleBn, 120)
         && (!('description' in data) || isOptionalString(data.description, 500))
         && (!('descriptionBn' in data) || isOptionalString(data.descriptionBn, 500))
+        && (!('groups' in data) || (data.groups is list && data.groups.size() <= 5))
+        && (!('isOptional' in data) || data.isOptional is bool)
         && data.order is int && data.order >= 0 && data.order <= 200
         && data.status in ['published', 'draft']
         && data.createdAt is timestamp
@@ -162,8 +172,8 @@ service cloud.firestore {
     }
 
     function isValidLesson(data) {
-      return data.keys().hasAll(['lessonId', 'classId', 'subjectId', 'chapterId', 'topicId', 'category', 'title', 'titleBn', 'youtubeUrl', 'difficulty', 'order', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['lessonId', 'classId', 'subjectId', 'chapterId', 'topicId', 'category', 'title', 'titleBn', 'youtubeUrl', 'thumbnailUrl', 'description', 'descriptionBn', 'objectives', 'difficulty', 'durationMinutes', 'featured', 'has3dMode', 'threeDSceneType', 'order', 'status', 'createdAt', 'updatedAt'])
+      return data.keys().hasAll(['lessonId', 'classId', 'subjectId', 'chapterId', 'topicId', 'category', 'title', 'titleBn', 'difficulty', 'order', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['lessonId', 'classId', 'subjectId', 'chapterId', 'topicId', 'category', 'title', 'titleBn', 'youtubeUrl', 'thumbnailUrl', 'description', 'descriptionBn', 'objectives', 'difficulty', 'durationMinutes', 'featured', 'order', 'status', 'createdAt', 'updatedAt'])
         && isValidId(data.lessonId)
         && isValidId(data.classId)
         && isValidId(data.subjectId)
@@ -172,7 +182,7 @@ service cloud.firestore {
         && isValidId(data.category)
         && isNonEmptyString(data.title, 200)
         && isNonEmptyString(data.titleBn, 200)
-        && isNonEmptyString(data.youtubeUrl, 500)
+        && (!('youtubeUrl' in data) || isOptionalString(data.youtubeUrl, 500))
         && (!('thumbnailUrl' in data) || isOptionalString(data.thumbnailUrl, 500))
         && (!('description' in data) || isOptionalString(data.description, 2000))
         && (!('descriptionBn' in data) || isOptionalString(data.descriptionBn, 2000))
@@ -180,8 +190,6 @@ service cloud.firestore {
         && data.difficulty in ['beginner', 'intermediate', 'advanced']
         && (!('durationMinutes' in data) || (data.durationMinutes is int && data.durationMinutes >= 0 && data.durationMinutes <= 600))
         && (!('featured' in data) || data.featured is bool)
-        && (!('has3dMode' in data) || data.has3dMode is bool)
-        && (!('threeDSceneType' in data) || data.threeDSceneType in ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom', 'ai_custom'])
         && data.order is int && data.order >= 0 && data.order <= 500
         && data.status in ['published', 'draft']
         && data.createdAt is timestamp
@@ -203,11 +211,12 @@ service cloud.firestore {
 
     function isValidQuiz(data) {
       return data.keys().hasAll(['quizId', 'lessonId', 'title', 'questions', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['quizId', 'lessonId', 'title', 'questions', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['quizId', 'lessonId', 'title', 'questions', 'creativeQuestions', 'status', 'createdAt', 'updatedAt'])
         && isValidId(data.quizId)
         && isValidId(data.lessonId)
         && isNonEmptyString(data.title, 200)
         && data.questions is list && data.questions.size() <= 20 && (data.questions.size() == 0 || data.questions[0] is map)
+        && (!('creativeQuestions' in data) || (data.creativeQuestions is list && data.creativeQuestions.size() <= 10))
         && data.status in ['published', 'draft']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -372,7 +381,7 @@ service cloud.firestore {
           (isOwner(uid)
             && incoming().role == existing().role
             && incoming().accountStatus == existing().accountStatus
-            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'classId', 'preferredLanguage', 'preferredTheme', 'dailyGoalMinutes', 'streakDays', 'updatedAt']))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'classId', 'preferredLanguage', 'preferredTheme', 'dailyGoalMinutes', 'activeBorder', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(uid);
 

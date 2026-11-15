@@ -4,13 +4,12 @@ import {
   AlertCircle,
   BarChart3,
   BookOpen,
-  Box,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Cloud,
   Download,
-  ExternalLink,
   Eye,
   EyeOff,
   FileText,
@@ -19,6 +18,8 @@ import {
   Lock,
   LogOut,
   Palette,
+  Pencil,
+  Phone,
   Plus,
   RefreshCw,
   ShieldCheck,
@@ -28,22 +29,28 @@ import {
   Users,
   Video,
   Wand2,
+  X,
+  Youtube,
 } from 'lucide-react';
-import { BRAND_LOGO_PATH, createClientId, formatTimestamp } from '../lib/utils';
+import { GROUP_OPTIONS } from '../lib/subjectIcons';
+import { BRAND_LOGO_PATH, createClientId, extractYouTubeId, formatTimestamp, getLogoContrastClass } from '../lib/utils';
 import { useApp } from '../context/AppContext';
 import type {
   ActivityLog,
   AdminAccount,
   AppSettings,
+  ContactEntry,
   DifficultyLevel,
   LessonCategory,
+  LessonItem,
   PublishStatus,
-  ThreeDSceneType,
+  ResourceItem,
+  SubjectGroup,
   UserProfile,
 } from '../types';
 
 type AdminTab = 'overview' | 'videos' | 'curriculum' | 'admins' | 'students' | 'customize';
-type CurriculumEntity = 'subject' | 'category' | 'class' | 'chapter' | 'topic' | 'announcement';
+type CurriculumEntity = 'subject' | 'class' | 'chapter' | 'announcement' | 'category';
 
 interface AdminStudentRow extends UserProfile {
   completedLessonsCount?: number;
@@ -66,16 +73,15 @@ export const AdminDashboard: React.FC = () => {
   const {
     isAdmin,
     currentAdmin,
-    firebaseUser,
-    hasFirestoreAdminAuth,
+    adminPasswordUpdatedAt,
     firebaseConnected,
     language,
     categories,
     classes,
     subjects,
     chapters,
-    topics,
     lessons,
+    resources,
     quizzes,
     announcements,
     appSettings,
@@ -85,14 +91,12 @@ export const AdminDashboard: React.FC = () => {
     deleteItemFromFirestore,
     syncAdminInviteToFirestore,
     loginAdminWithPassword,
-    loginAdminWithGoogle,
     logoutAdmin,
     changeAdminPassword,
     navigate,
   } = useApp();
 
   const [tab, setTab] = useState<AdminTab>('overview');
-  const [adminEmailInput, setAdminEmailInput] = useState('');
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [showAdminPass, setShowAdminPass] = useState(false);
   const [adminAuthLoading, setAdminAuthLoading] = useState(false);
@@ -101,19 +105,19 @@ export const AdminDashboard: React.FC = () => {
   // Multi-Admin Registry & Password State
   const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([]);
   const [newAdminName, setNewAdminName] = useState('');
-  const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminPass, setNewAdminPass] = useState('');
   const [newAdminRole, setNewAdminRole] = useState<'admin' | 'owner'>('admin');
   const [curAdminPass, setCurAdminPass] = useState('');
   const [nextAdminPass, setNextAdminPass] = useState('');
   const [confirmAdminPass, setConfirmAdminPass] = useState('');
+  const [showChangePass, setShowChangePass] = useState(false);
   const [passChangeLoading, setPassChangeLoading] = useState(false);
   const [passChangeError, setPassChangeError] = useState<string | null>(null);
   const [passChangeSuccess, setPassChangeSuccess] = useState<string | null>(null);
 
   const [students, setStudents] = useState<AdminStudentRow[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
-  const [healthInfo, setHealthInfo] = useState<{ ok?: boolean; geminiConfigured?: boolean; adminFirestoreReady?: boolean }>({});
+  const [healthInfo, setHealthInfo] = useState<{ ok?: boolean; geminiConfigured?: boolean }>({});
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [savingBusy, setSavingBusy] = useState(false);
   const [confirmClearDemos, setConfirmClearDemos] = useState(false);
@@ -126,16 +130,20 @@ export const AdminDashboard: React.FC = () => {
   const [newStuPass, setNewStuPass] = useState('');
   const [newStuLang, setNewStuLang] = useState<'bn' | 'en'>('bn');
 
-  // Curriculum creation (Subject default for Bangladesh subjects, plus Category/Class/Optional Chapter/Topic/Announcement)
+  // Curriculum creation & editing
   const [entityType, setEntityType] = useState<CurriculumEntity>('subject');
+  const [editingEntityId, setEditingEntityId] = useState<string | null>(null);
   const [entTitle, setEntTitle] = useState('');
   const [entTitleBn, setEntTitleBn] = useState('');
   const [entDesc, setEntDesc] = useState('');
-  const [entIcon, setEntIcon] = useState('sparkles');
+  const [entDescBn, setEntDescBn] = useState('');
+  const [entIcon, setEntIcon] = useState('layers');
   const [entClassId, setEntClassId] = useState('class-9');
   const [entSubjectId, setEntSubjectId] = useState('');
-  const [entChapterId, setEntChapterId] = useState('');
   const [entOrder, setEntOrder] = useState(1);
+  const [entIsOptional, setEntIsOptional] = useState(false);
+  const [entGroups, setEntGroups] = useState<SubjectGroup[]>(['common']);
+  const [subjectListClassFilter, setSubjectListClassFilter] = useState('all');
 
   // AI One-Click Module Builder
   const [aiModulePrompt, setAiModulePrompt] = useState('');
@@ -143,7 +151,8 @@ export const AdminDashboard: React.FC = () => {
   const [aiModuleSubjectId, setAiModuleSubjectId] = useState('subj-9-physics');
   const [aiModuleBusy, setAiModuleBusy] = useState(false);
 
-  // Ultra-Simple Video + 3D Lesson Upload Form
+  // Simple Lesson Upload & Edit Form (No 3D!)
+  const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
   const [showOptionalLessonFields, setShowOptionalLessonFields] = useState(false);
   const [vidAiTopic, setVidAiTopic] = useState('');
   const [vidAiBusy, setVidAiBusy] = useState(false);
@@ -152,17 +161,27 @@ export const AdminDashboard: React.FC = () => {
   const [vidTitleBn, setVidTitleBn] = useState('');
   const [vidUrl, setVidUrl] = useState('');
   const [vidClassId, setVidClassId] = useState('class-9');
+  const [vidGroupId, setVidGroupId] = useState<'all' | Exclude<SubjectGroup, 'common'>>('all');
   const [vidSubjectId, setVidSubjectId] = useState('subj-9-physics');
-  const [vidChapterId, setVidChapterId] = useState(''); // optional -> defaults to 'general'
-  const [vidTopicId, setVidTopicId] = useState(''); // optional -> defaults to 'general'
-  const [vidCategory, setVidCategory] = useState<LessonCategory>('interactive_3d');
+  const [vidChapterId, setVidChapterId] = useState('');
+  const [isAddingNewChapter, setIsAddingNewChapter] = useState(false);
+  const [newChapterTitle, setNewChapterTitle] = useState('');
+  const [newChapterTitleBn, setNewChapterTitleBn] = useState('');
+  const [oneShotTag, setOneShotTag] = useState('Exam Night Special');
+  const [vidCategory, setVidCategory] = useState<LessonCategory>('basic_to_pro');
   const [vidDifficulty, setVidDifficulty] = useState<DifficultyLevel>('intermediate');
   const [vidDuration, setVidDuration] = useState(15);
   const [vidStatus, setVidStatus] = useState<PublishStatus>('published');
   const [vidDesc, setVidDesc] = useState('');
   const [vidDescBn, setVidDescBn] = useState('');
-  const [vidHas3d, setVidHas3d] = useState(true);
-  const [vidSceneType, setVidSceneType] = useState<ThreeDSceneType>('trigonometry_triangle');
+
+  // Study PDF / Note Resource Form
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [resTitle, setResTitle] = useState('');
+  const [resTitleBn, setResTitleBn] = useState('');
+  const [resUrl, setResUrl] = useState('');
+  const [resType, setResType] = useState<'PDF' | 'Formula Sheet' | 'Notes' | 'Worksheet'>('PDF');
+  const [resLessonId, setResLessonId] = useState('');
 
   // Quiz Creation Form
   const [quizLessonId, setQuizLessonId] = useState('');
@@ -172,18 +191,28 @@ export const AdminDashboard: React.FC = () => {
   const [quizCorrect, setQuizCorrect] = useState(0);
   const [quizExp, setQuizExp] = useState('');
 
-  // Website Customization Settings Draft
+  // Website Customization & Footer Contacts Draft
   const [draftSettings, setDraftSettings] = useState<AppSettings>(appSettings);
+  const [editingContactId, setEditingContactId] = useState<string | null>(null);
+  const [contactName, setContactName] = useState('');
+  const [contactRole, setContactRole] = useState('');
+  const [contactEmailInput, setContactEmailInput] = useState('');
+  const [contactPhoneInput, setContactPhoneInput] = useState('');
 
   useEffect(() => {
     setDraftSettings(appSettings);
   }, [appSettings]);
 
-  // Keep filtered Subject valid when Class changes
-  const subjectsForVidClass = useMemo(
-    () => subjects.filter((s) => s.classId === vidClassId),
-    [subjects, vidClassId]
-  );
+  const isVidSenior = vidClassId === 'class-9' || vidClassId === 'class-10';
+
+  const subjectsForVidClass = useMemo(() => {
+    const byClass = subjects.filter((s) => s.classId === vidClassId);
+    if (!isVidSenior || vidGroupId === 'all') return byClass;
+    return byClass.filter((s) => {
+      const g = s.groups && s.groups.length > 0 ? s.groups : ['common'];
+      return g.includes('common') || g.includes(vidGroupId);
+    });
+  }, [subjects, vidClassId, isVidSenior, vidGroupId]);
 
   useEffect(() => {
     if (subjectsForVidClass.length > 0 && !subjectsForVidClass.some((s) => s.subjectId === vidSubjectId)) {
@@ -195,6 +224,13 @@ export const AdminDashboard: React.FC = () => {
     () => chapters.filter((c) => c.subjectId === vidSubjectId),
     [chapters, vidSubjectId]
   );
+
+  const lessonsForVidSubject = useMemo(
+    () => lessons.filter((l) => l.subjectId === vidSubjectId),
+    [lessons, vidSubjectId]
+  );
+
+  const extractedVidYtId = useMemo(() => extractYouTubeId(vidUrl), [vidUrl]);
 
   const notify = useCallback((msg: string) => {
     setStatusMsg(msg);
@@ -285,7 +321,6 @@ export const AdminDashboard: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to clear demo content');
 
-      // Delete matching built-in sample docs in Firestore as well if connected
       const removedIds: Array<{ col: string; id: string }> = [
         { col: 'lessons', id: 'les-sample-3d-demo' },
         { col: 'lessons', id: 'les-newton-gravity' },
@@ -306,7 +341,7 @@ export const AdminDashboard: React.FC = () => {
       notify(
         language === 'bn'
           ? 'সব ডেমো/স্যাম্পল লেসন ও কুইজ মুছে ফেলা হয়েছে!'
-          : 'All built-in demo lessons, sample chapters, and sample quizzes deleted!'
+          : 'All built-in demo lessons, sample resources, and sample quizzes deleted!'
       );
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not clear demo content.');
@@ -320,22 +355,10 @@ export const AdminDashboard: React.FC = () => {
     setAdminAuthError(null);
     setAdminAuthLoading(true);
     try {
-      await loginAdminWithPassword(adminPasswordInput, adminEmailInput.trim() || undefined);
+      await loginAdminWithPassword(adminPasswordInput.trim());
       setAdminPasswordInput('');
     } catch (err) {
-      setAdminAuthError(err instanceof Error ? err.message : 'Incorrect Admin credentials.');
-    } finally {
-      setAdminAuthLoading(false);
-    }
-  };
-
-  const handleGoogleAdminUnlock = async () => {
-    setAdminAuthError(null);
-    setAdminAuthLoading(true);
-    try {
-      await loginAdminWithGoogle();
-    } catch (err) {
-      setAdminAuthError(err instanceof Error ? err.message : 'Google Admin sign-in failed.');
+      setAdminAuthError(err instanceof Error ? err.message : 'Incorrect Admin password.');
     } finally {
       setAdminAuthLoading(false);
     }
@@ -344,7 +367,7 @@ export const AdminDashboard: React.FC = () => {
   // Visual Analytics computed datasets
   const categoryBreakdown = useMemo(() => {
     const total = Math.max(lessons.length, 1);
-    const items = categories.map((cat, idx) => {
+    return categories.map((cat, idx) => {
       const count = lessons.filter((l) => l.category === cat.categoryId).length;
       return {
         id: cat.categoryId,
@@ -354,7 +377,6 @@ export const AdminDashboard: React.FC = () => {
         color: CHART_COLORS[idx % CHART_COLORS.length]!,
       };
     });
-    return items;
   }, [categories, lessons, language]);
 
   const classAnalytics = useMemo(() => {
@@ -376,13 +398,14 @@ export const AdminDashboard: React.FC = () => {
     () => students.filter((s) => s.accountStatus !== 'suspended').length,
     [students]
   );
-  const lessons3dCount = useMemo(() => lessons.filter((l) => l.has3dMode).length, [lessons]);
   const totalQuestionsCount = useMemo(
     () => quizzes.reduce((acc, q) => acc + (q.questions?.length || 0), 0),
     [quizzes]
   );
 
-  // Admin Login Screen
+  // ============================================================================
+  // ADMIN LOGIN SCREEN (Simple Single Password — Zero Gmail / Google OAuth)
+  // ============================================================================
   if (!isAdmin) {
     return (
       <div className="mx-auto flex min-h-[75vh] max-w-md items-center px-4 py-12">
@@ -391,15 +414,15 @@ export const AdminDashboard: React.FC = () => {
             <img
               src={appSettings.branding.logoUrl || BRAND_LOGO_PATH}
               alt="ASA,LEARN logo"
-              className="h-16 w-auto object-contain"
+              className={`h-20 w-auto object-contain transition ${getLogoContrastClass(appSettings.branding.logoUrl)}`}
             />
             <h1 className="font-display mt-4 text-2xl font-bold text-[#172033] dark:text-white">
               {language === 'bn' ? 'অ্যাডমিন পোর্টাল' : 'Admin Portal'}
             </h1>
             <p className="mt-1 text-xs text-[#64748B] dark:text-slate-400">
               {language === 'bn'
-                ? 'অ্যাডমিন পাসওয়ার্ড অথবা অনুমোদিত Google অ্যাকাউন্ট দিয়ে প্রবেশ করুন'
-                : 'Unlock with your Admin password or sign in with an authorized Google Admin email'}
+                ? 'অ্যাডমিন পাসওয়ার্ড দিয়ে প্রবেশ করুন (একাধিক অ্যাডমিন একসাথে লগইন করতে পারবেন)'
+                : 'Sign in with the Admin Portal password or your assigned Admin passcode'}
             </p>
           </div>
 
@@ -411,19 +434,6 @@ export const AdminDashboard: React.FC = () => {
           )}
 
           <form onSubmit={handleAdminUnlock} className="mt-6 space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-[#172033] dark:text-slate-200">
-                {language === 'bn' ? 'অ্যাডমিন ইমেইল (ঐচ্ছিক)' : 'Admin Email (Optional for co-admins)'}
-              </label>
-              <input
-                type="email"
-                value={adminEmailInput}
-                onChange={(e) => setAdminEmailInput(e.target.value)}
-                placeholder="co-admin@example.com (leave blank for owner)"
-                className="mt-1.5 w-full rounded-xl border border-[#172554]/15 bg-white/90 px-3.5 py-2.5 text-sm text-[#172033] focus:outline-none dark:border-white/15 dark:bg-slate-900/85 dark:text-white"
-              />
-            </div>
-
             <div>
               <label className="block text-xs font-semibold text-[#172033] dark:text-slate-200">
                 {language === 'bn' ? 'অ্যাডমিন পাসওয়ার্ড' : 'Admin Password'}
@@ -439,7 +449,12 @@ export const AdminDashboard: React.FC = () => {
                   placeholder="••••••••••••"
                   className="w-full bg-transparent text-sm text-[#172033] focus:outline-none dark:text-white"
                 />
-                <button type="button" onClick={() => setShowAdminPass(!showAdminPass)} className="text-[#64748B]">
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPass(!showAdminPass)}
+                  aria-label="Toggle password visibility"
+                  className="text-[#64748B]"
+                >
                   {showAdminPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
@@ -462,74 +477,133 @@ export const AdminDashboard: React.FC = () => {
               </span>
             </button>
           </form>
-
-          <div className="mt-4 border-t border-[#172554]/10 pt-4 dark:border-white/10">
-            <button
-              type="button"
-              disabled={adminAuthLoading}
-              onClick={() => void handleGoogleAdminUnlock()}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#172554]/20 bg-white py-2.5 text-xs font-bold text-[#172554] transition hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
-            >
-              <Cloud className="h-4 w-4" />
-              <span>{language === 'bn' ? 'Google দিয়ে অ্যাডমিন লগইন করুন' : 'Sign in with Google Admin'}</span>
-            </button>
-          </div>
         </div>
       </div>
     );
   }
 
-  // Easy Lesson Upload Handler
-  const handleAddLesson = async (e: React.FormEvent) => {
+  // ============================================================================
+  // LESSON ADD / EDIT HANDLERS
+  // ============================================================================
+  const resetLessonForm = () => {
+    setEditingLessonId(null);
+    setVidTitle('');
+    setVidTitleBn('');
+    setVidUrl('');
+    setVidDesc('');
+    setVidDescBn('');
+    setVidAiTopic('');
+    setVidAiQuestions([]);
+    setNewChapterTitle('');
+    setNewChapterTitleBn('');
+    setIsAddingNewChapter(false);
+  };
+
+  const startEditLesson = (l: LessonItem) => {
+    setEditingLessonId(l.lessonId);
+    setVidClassId(l.classId);
+    setVidGroupId('all');
+    setVidSubjectId(l.subjectId);
+    setVidChapterId(l.chapterId === 'general' ? '' : l.chapterId);
+    setIsAddingNewChapter(false);
+    setVidCategory(l.category === 'one_shot' ? 'one_shot' : 'basic_to_pro');
+    setVidTitle(l.title);
+    setVidTitleBn(l.titleBn || '');
+    setVidUrl(l.youtubeUrl || '');
+    setVidDesc(l.description || '');
+    setVidDescBn(l.descriptionBn || '');
+    setVidDifficulty(l.difficulty || 'intermediate');
+    setVidDuration(l.durationMinutes || 15);
+    setVidStatus(l.status || 'published');
+    setShowOptionalLessonFields(true);
+    setTab('videos');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSaveLesson = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!vidTitle.trim()) return;
     setSavingBusy(true);
     try {
-      const lessonId = createClientId('les');
-      await saveContentItem('lessons', 'lessonId', {
+      let targetChapterId = vidChapterId || 'general';
+      if (vidCategory !== 'one_shot' && isAddingNewChapter && newChapterTitle.trim()) {
+        targetChapterId = createClientId('chap');
+        await saveContentItem('chapters', 'chapterId', {
+          chapterId: targetChapterId,
+          classId: vidClassId,
+          subjectId: vidSubjectId,
+          title: newChapterTitle.trim(),
+          titleBn: newChapterTitleBn.trim() || newChapterTitle.trim(),
+          description: '',
+          descriptionBn: '',
+          order: chaptersForVidSubject.length + 1,
+          status: 'published',
+        });
+      } else if (vidCategory === 'one_shot') {
+        targetChapterId = 'general';
+      }
+
+      const lessonId = editingLessonId || createClientId('les');
+      const existingLesson = editingLessonId ? lessons.find((l) => l.lessonId === editingLessonId) : undefined;
+      const finalTitle = vidTitle.trim();
+
+      const savedRes = await saveContentItem('lessons', 'lessonId', {
         lessonId,
         classId: vidClassId,
         subjectId: vidSubjectId,
-        chapterId: vidChapterId || 'general',
-        topicId: vidTopicId || 'general',
-        category: vidCategory || categories[0]?.categoryId || 'interactive_3d',
-        title: vidTitle.trim(),
-        titleBn: vidTitleBn.trim() || vidTitle.trim(),
-        youtubeUrl: vidUrl.trim() || 'demo://trigonometry-3d',
-        description: vidDesc.trim(),
+        chapterId: targetChapterId,
+        topicId: existingLesson?.topicId || 'general',
+        category: vidCategory || 'basic_to_pro',
+        title: finalTitle,
+        titleBn: vidTitleBn.trim() || finalTitle,
+        youtubeUrl: vidUrl.trim(),
+        description:
+          vidDesc.trim() ||
+          (vidCategory === 'one_shot' && oneShotTag.trim() ? `${oneShotTag.trim()} revision class.` : ''),
         descriptionBn: vidDescBn.trim() || vidDesc.trim(),
-        objectives: [],
+        objectives: existingLesson?.objectives || [],
         difficulty: vidDifficulty,
         durationMinutes: Number(vidDuration) || 15,
-        featured: true,
-        has3dMode: vidHas3d,
-        threeDSceneType: vidHas3d ? vidSceneType : undefined,
-        order: lessons.length + 1,
+        featured: existingLesson?.featured ?? true,
+        order: existingLesson?.order ?? lessons.length + 1,
         status: vidStatus,
       });
 
-      if (vidAiQuestions.length > 0) {
+      if (!editingLessonId && vidAiQuestions.length > 0) {
         const quizId = createClientId('quiz');
         await saveContentItem('quizzes', 'quizId', {
           quizId,
           lessonId,
-          title: `${vidTitle.trim()} Quiz`,
+          title: `${finalTitle} Quiz`,
           status: 'published',
           questions: vidAiQuestions.map((q, idx) => ({
             id: createClientId(`q${idx + 1}`),
             ...q,
           })),
         });
+      } else if (!editingLessonId && savedRes?.generatedQuiz?.quizId) {
+        await syncItemToFirestore('quizzes', String(savedRes.generatedQuiz.quizId), savedRes.generatedQuiz);
+        await refreshCurriculum();
       }
 
-      setVidTitle('');
-      setVidTitleBn('');
-      setVidUrl('');
-      setVidDesc('');
-      setVidDescBn('');
-      setVidAiTopic('');
-      setVidAiQuestions([]);
-      notify(language === 'bn' ? 'ক্লাস / লেসন সফলভাবে আপলোড হয়েছে!' : 'Class lesson published live!');
+      const wasEdit = Boolean(editingLessonId);
+      resetLessonForm();
+      if (targetChapterId !== 'general') {
+        setVidChapterId(targetChapterId);
+      }
+      notify(
+        wasEdit
+          ? language === 'bn'
+            ? 'লেসন সফলভাবে আপডেট হয়েছে!'
+            : 'Lesson updated live!'
+          : savedRes?.generatedQuiz
+            ? language === 'bn'
+              ? 'ক্লাস পাবলিশ হয়েছে এবং AI MCQ ও সৃজনশীল প্রশ্ন তৈরি করেছে!'
+              : 'Class published live + Gemini AI auto-generated MCQs & CQs!'
+            : language === 'bn'
+              ? 'ক্লাস / লেসন সফলভাবে আপলোড হয়েছে!'
+              : 'Class lesson published live!'
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not save lesson.');
     } finally {
@@ -568,11 +642,6 @@ export const AdminDashboard: React.FC = () => {
         setVidDifficulty(gen.difficulty);
       }
       if (gen.durationMinutes) setVidDuration(Number(gen.durationMinutes) || 15);
-      if (typeof gen.has3dMode === 'boolean') setVidHas3d(gen.has3dMode);
-      const validScenes: ThreeDSceneType[] = ['trigonometry_triangle', 'newton_orbit', 'algebra_geometry', 'molecule_atom'];
-      if (validScenes.includes(gen.threeDSceneType)) {
-        setVidSceneType(gen.threeDSceneType);
-      }
       if (Array.isArray(gen.questions)) {
         setVidAiQuestions(gen.questions);
       }
@@ -596,12 +665,127 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  const handleCreateCurriculumItem = async (e: React.FormEvent) => {
+  // ============================================================================
+  // STUDY RESOURCE (PDF / NOTES) CRUD HANDLERS
+  // ============================================================================
+  const resetResourceForm = () => {
+    setEditingResourceId(null);
+    setResTitle('');
+    setResTitleBn('');
+    setResUrl('');
+    setResType('PDF');
+    setResLessonId('');
+  };
+
+  const startEditResource = (res: ResourceItem) => {
+    setEditingResourceId(res.resourceId);
+    setResTitle(res.title);
+    setResTitleBn(res.titleBn || '');
+    setResUrl(res.fileUrl);
+    setResType((res.fileType as typeof resType) || 'PDF');
+    setResLessonId(res.lessonId || '');
+  };
+
+  const handleSaveResource = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resTitle.trim() || !resUrl.trim()) return;
+    setSavingBusy(true);
+    try {
+      const resourceId = editingResourceId || createClientId('res');
+      await saveContentItem('resources', 'resourceId', {
+        resourceId,
+        lessonId: resLessonId || lessons[0]?.lessonId || 'general',
+        title: resTitle.trim(),
+        titleBn: resTitleBn.trim() || resTitle.trim(),
+        fileType: resType,
+        fileUrl: resUrl.trim(),
+        downloadable: true,
+        status: 'published',
+      });
+      const wasEdit = Boolean(editingResourceId);
+      resetResourceForm();
+      notify(wasEdit ? 'Study resource updated!' : 'Study PDF/Note saved live!');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not save study resource.');
+    } finally {
+      setSavingBusy(false);
+    }
+  };
+
+  // ============================================================================
+  // CURRICULUM ENTITY ADD + EDIT HANDLERS
+  // ============================================================================
+  const resetEntityForm = () => {
+    setEditingEntityId(null);
+    setEntTitle('');
+    setEntTitleBn('');
+    setEntDesc('');
+    setEntDescBn('');
+    setEntIsOptional(false);
+    setEntGroups(['common']);
+    setEntOrder(1);
+  };
+
+  const startEditEntity = (type: CurriculumEntity, item: Record<string, unknown>) => {
+    setEntityType(type);
+    if (type === 'subject') {
+      setEditingEntityId(String(item.subjectId));
+      setEntClassId(String(item.classId || 'class-9'));
+      setEntTitle(String(item.title || ''));
+      setEntTitleBn(String(item.titleBn || ''));
+      setEntDesc(String(item.description || ''));
+      setEntIsOptional(Boolean(item.isOptional));
+      setEntGroups(Array.isArray(item.groups) && item.groups.length > 0 ? (item.groups as SubjectGroup[]) : ['common']);
+      setEntOrder(Number(item.order) || 1);
+    } else if (type === 'class') {
+      setEditingEntityId(String(item.classId));
+      setEntTitle(String(item.title || ''));
+      setEntTitleBn(String(item.titleBn || ''));
+      setEntDesc(String(item.description || ''));
+      setEntOrder(Number(item.order) || 1);
+    } else if (type === 'chapter') {
+      setEditingEntityId(String(item.chapterId));
+      setEntClassId(String(item.classId || 'class-9'));
+      setEntSubjectId(String(item.subjectId || ''));
+      setEntTitle(String(item.title || ''));
+      setEntTitleBn(String(item.titleBn || ''));
+      setEntDesc(String(item.description || ''));
+      setEntOrder(Number(item.order) || 1);
+    } else if (type === 'announcement') {
+      setEditingEntityId(String(item.announcementId));
+      setEntTitle(String(item.title || ''));
+      setEntTitleBn(String(item.titleBn || ''));
+      setEntDesc(String(item.content || ''));
+      setEntDescBn(String(item.contentBn || ''));
+    } else if (type === 'category') {
+      setEditingEntityId(String(item.categoryId));
+      setEntTitle(String(item.title || ''));
+      setEntTitleBn(String(item.titleBn || ''));
+      setEntDesc(String(item.description || ''));
+      setEntIcon(String(item.icon || 'layers'));
+      setEntOrder(Number(item.order) || 1);
+    }
+    setTab('curriculum');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const toggleGroupSelection = (grp: SubjectGroup) => {
+    setEntGroups((prev) => {
+      if (prev.includes(grp)) {
+        const next = prev.filter((g) => g !== grp);
+        return next.length > 0 ? next : ['common'];
+      }
+      if (grp === 'common') return ['common'];
+      return [...prev.filter((g) => g !== 'common'), grp];
+    });
+  };
+
+  const handleSaveCurriculumItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!entTitle.trim()) return;
     setSavingBusy(true);
     try {
-      const id = createClientId(entityType === 'category' ? 'cat' : entityType);
+      const id = editingEntityId || createClientId(entityType === 'category' ? 'cat' : entityType);
       if (entityType === 'subject') {
         await saveContentItem('subjects', 'subjectId', {
           subjectId: id,
@@ -610,6 +794,8 @@ export const AdminDashboard: React.FC = () => {
           titleBn: entTitleBn.trim() || entTitle.trim(),
           description: entDesc.trim(),
           descriptionBn: entDesc.trim(),
+          groups: entGroups.length > 0 ? entGroups : ['common'],
+          isOptional: entIsOptional,
           order: Number(entOrder) || subjects.length + 1,
           status: 'published',
         });
@@ -620,7 +806,7 @@ export const AdminDashboard: React.FC = () => {
           titleBn: entTitleBn.trim() || entTitle.trim(),
           description: entDesc.trim(),
           descriptionBn: entDesc.trim(),
-          icon: entIcon || 'sparkles',
+          icon: entIcon || 'layers',
           order: Number(entOrder) || categories.length + 1,
           status: 'published',
         });
@@ -635,7 +821,11 @@ export const AdminDashboard: React.FC = () => {
           status: 'published',
         });
       } else if (entityType === 'chapter') {
-        const subjTarget = entSubjectId || subjects.find((s) => s.classId === entClassId)?.subjectId || subjects[0]?.subjectId || 'general';
+        const subjTarget =
+          entSubjectId ||
+          subjects.find((s) => s.classId === entClassId)?.subjectId ||
+          subjects[0]?.subjectId ||
+          'general';
         await saveContentItem('chapters', 'chapterId', {
           chapterId: id,
           classId: entClassId,
@@ -647,36 +837,20 @@ export const AdminDashboard: React.FC = () => {
           order: Number(entOrder) || chapters.length + 1,
           status: 'published',
         });
-      } else if (entityType === 'topic') {
-        const subjTarget = entSubjectId || subjects[0]?.subjectId || 'general';
-        const chapTarget = entChapterId || chapters.find((c) => c.subjectId === subjTarget)?.chapterId || 'general';
-        await saveContentItem('topics', 'topicId', {
-          topicId: id,
-          classId: entClassId,
-          subjectId: subjTarget,
-          chapterId: chapTarget,
-          title: entTitle.trim(),
-          titleBn: entTitleBn.trim() || entTitle.trim(),
-          description: entDesc.trim(),
-          descriptionBn: entDesc.trim(),
-          order: Number(entOrder) || topics.length + 1,
-          status: 'published',
-        });
       } else if (entityType === 'announcement') {
         await saveContentItem('announcements', 'announcementId', {
           announcementId: id,
           title: entTitle.trim(),
           titleBn: entTitleBn.trim() || entTitle.trim(),
           content: entDesc.trim() || entTitle.trim(),
-          contentBn: entDesc.trim() || entTitle.trim(),
-          targetClasses: [entClassId],
+          contentBn: entDescBn.trim() || entDesc.trim() || entTitle.trim(),
+          targetClasses: classes.map((c) => c.classId),
           published: true,
         });
       }
-      setEntTitle('');
-      setEntTitleBn('');
-      setEntDesc('');
-      notify(language === 'bn' ? 'সফলভাবে সংরক্ষিত হয়েছে!' : 'Saved and published!');
+      const wasEdit = Boolean(editingEntityId);
+      resetEntityForm();
+      notify(wasEdit ? (language === 'bn' ? 'আপডেট সম্পন্ন হয়েছে!' : 'Updated live!') : (language === 'bn' ? 'সফলভাবে সংরক্ষিত হয়েছে!' : 'Saved and published!'));
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Save failed.');
     } finally {
@@ -707,7 +881,7 @@ export const AdminDashboard: React.FC = () => {
       notify(
         language === 'bn'
           ? `AI মডিউল তৈরি হয়েছে: ${data.lesson?.titleBn || data.lesson?.title}`
-          : `AI created Lesson + 3D + Quiz: ${data.lesson?.title}`
+          : `AI created Lesson + Quiz: ${data.lesson?.title}`
       );
     } catch (err) {
       notify(err instanceof Error ? err.message : 'AI Module Builder failed.');
@@ -755,11 +929,13 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  // Multi-Admin Management Handlers
+  // ============================================================================
+  // MULTI-ADMIN GRANT / REVOKE & PASSWORD CHANGE (NO GMAIL)
+  // ============================================================================
   const handleGrantAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAdminName.trim() || newAdminPass.trim().length < 6) {
-      notify('Name and password (min 6 chars) are required.');
+      notify('Admin name and passcode (min 6 characters) are required.');
       return;
     }
     setSavingBusy(true);
@@ -770,7 +946,6 @@ export const AdminDashboard: React.FC = () => {
         credentials: 'include',
         body: JSON.stringify({
           name: newAdminName.trim(),
-          email: newAdminEmail.trim() || undefined,
           password: newAdminPass.trim(),
           role: newAdminRole,
         }),
@@ -783,7 +958,6 @@ export const AdminDashboard: React.FC = () => {
       }
 
       setNewAdminName('');
-      setNewAdminEmail('');
       setNewAdminPass('');
       await loadAdminExtras();
       notify(language === 'bn' ? 'নতুন অ্যাডমিন অ্যাক্সেস যুক্ত হয়েছে!' : 'New Admin access granted!');
@@ -822,11 +996,8 @@ export const AdminDashboard: React.FC = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Remove failed');
-      if (adm.email) {
-        await deleteItemFromFirestore('adminEmails', adm.email.toLowerCase());
-      }
       await loadAdminExtras();
-      notify(`Removed admin ${adm.name}`);
+      notify(`Revoked admin access for ${adm.name}`);
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not remove admin.');
     }
@@ -836,21 +1007,29 @@ export const AdminDashboard: React.FC = () => {
     e.preventDefault();
     setPassChangeError(null);
     setPassChangeSuccess(null);
-    if (nextAdminPass.length < 6) {
+    const curClean = curAdminPass.trim();
+    const nextClean = nextAdminPass.trim();
+    const confirmClean = confirmAdminPass.trim();
+
+    if (nextClean.length < 6) {
       setPassChangeError('New password must be at least 6 characters.');
       return;
     }
-    if (nextAdminPass !== confirmAdminPass) {
+    if (nextClean !== confirmClean) {
       setPassChangeError('New passwords do not match.');
       return;
     }
     setPassChangeLoading(true);
     try {
-      await changeAdminPassword(curAdminPass, nextAdminPass);
+      await changeAdminPassword(curClean, nextClean);
       setCurAdminPass('');
       setNextAdminPass('');
       setConfirmAdminPass('');
-      setPassChangeSuccess(language === 'bn' ? 'অ্যাডমিন পাসওয়ার্ড পরিবর্তন হয়েছে!' : 'Password updated!');
+      setPassChangeSuccess(
+        language === 'bn'
+          ? 'শেয়ার্ড অ্যাডমিন পাসওয়ার্ড সফলভাবে পরিবর্তন হয়েছে!'
+          : 'Shared Admin password updated successfully!'
+      );
       notify('Admin password updated!');
     } catch (err) {
       setPassChangeError(err instanceof Error ? err.message : 'Could not change password.');
@@ -859,6 +1038,9 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
+  // ============================================================================
+  // STUDENTS & FOOTER CONTACTS & SETTINGS
+  // ============================================================================
   const handleCreateStudentByAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -902,20 +1084,77 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const persistSettingsObject = async (next: AppSettings, successLabel: string) => {
     setSavingBusy(true);
     try {
       await saveContentItem('appSettings', 'settingId', {
-        ...draftSettings,
+        ...next,
         settingId: 'global',
       });
-      notify(language === 'bn' ? 'ওয়েবসাইট সেটিংস সেভ ও লাইভ হয়েছে!' : 'All website customizations saved live!');
+      notify(successLabel);
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not save settings.');
     } finally {
       setSavingBusy(false);
     }
+  };
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await persistSettingsObject(
+      draftSettings,
+      language === 'bn' ? 'ওয়েবসাইট সেটিংস সেভ ও লাইভ হয়েছে!' : 'All website customizations & contacts saved live!'
+    );
+  };
+
+  const resetContactEditor = () => {
+    setEditingContactId(null);
+    setContactName('');
+    setContactRole('');
+    setContactEmailInput('');
+    setContactPhoneInput('');
+  };
+
+  const handleSaveContactEntry = async () => {
+    if (!contactName.trim() || (!contactEmailInput.trim() && !contactPhoneInput.trim())) {
+      notify('Enter contact name and email or phone number.');
+      return;
+    }
+    const existingList = draftSettings.branding.contacts || [];
+    const entry: ContactEntry = {
+      id: editingContactId || createClientId('contact'),
+      name: contactName.trim(),
+      role: contactRole.trim() || 'Admin Support',
+      email: contactEmailInput.trim(),
+      phone: contactPhoneInput.trim(),
+    };
+    const nextList = editingContactId
+      ? existingList.map((c) => (c.id === editingContactId ? entry : c))
+      : [...existingList, entry];
+    const nextSettings: AppSettings = {
+      ...draftSettings,
+      branding: {
+        ...draftSettings.branding,
+        contacts: nextList,
+      },
+    };
+    setDraftSettings(nextSettings);
+    resetContactEditor();
+    await persistSettingsObject(nextSettings, 'Footer contact saved live!');
+  };
+
+  const handleDeleteContactEntry = async (id: string) => {
+    const nextList = (draftSettings.branding.contacts || []).filter((c) => c.id !== id);
+    const nextSettings: AppSettings = {
+      ...draftSettings,
+      branding: {
+        ...draftSettings.branding,
+        contacts: nextList,
+      },
+    };
+    setDraftSettings(nextSettings);
+    if (editingContactId === id) resetContactEditor();
+    await persistSettingsObject(nextSettings, 'Contact removed from footer!');
   };
 
   const handleExportBackup = () => {
@@ -925,8 +1164,8 @@ export const AdminDashboard: React.FC = () => {
       classes,
       subjects,
       chapters,
-      topics,
       lessons,
+      resources,
       quizzes,
       announcements,
       appSettings,
@@ -947,14 +1186,18 @@ export const AdminDashboard: React.FC = () => {
     return true;
   });
 
-  // Streamlined 6 Admin Tabs
+  const filteredAdminSubjects = subjects.filter(
+    (s) => subjectListClassFilter === 'all' || s.classId === subjectListClassFilter
+  );
+
+  // Cleanly Separated 6 Admin Tabs
   const adminNav: Array<{ id: AdminTab; label: string; icon: React.ReactNode }> = [
-    { id: 'overview', label: language === 'bn' ? 'ওভারভিউ ও অ্যানালিটিক্স' : 'Overview & Stats', icon: <BarChart3 className="h-4 w-4" /> },
-    { id: 'videos', label: language === 'bn' ? 'সহজ ক্লাস আপলোড' : 'Upload Class / Lesson', icon: <Video className="h-4 w-4" /> },
-    { id: 'curriculum', label: language === 'bn' ? 'বিষয়, অধ্যায় ও কুইজ' : 'Subjects & Quizzes', icon: <FolderPlus className="h-4 w-4" /> },
-    { id: 'admins', label: language === 'bn' ? 'অ্যাডমিন ও Firebase' : 'Admins & Firebase', icon: <ShieldCheck className="h-4 w-4" /> },
+    { id: 'overview', label: language === 'bn' ? 'ওভারভিউ ও নোটিশ' : 'Overview & Notices', icon: <BarChart3 className="h-4 w-4" /> },
+    { id: 'videos', label: language === 'bn' ? 'ক্লাস ও PDF রিসোর্স' : 'Lessons & PDFs', icon: <Video className="h-4 w-4" /> },
+    { id: 'curriculum', label: language === 'bn' ? 'শ্রেণি, বিষয় ও কুইজ' : 'Classes, Subjects & Quizzes', icon: <FolderPlus className="h-4 w-4" /> },
+    { id: 'admins', label: language === 'bn' ? 'অ্যাডমিন ও পাসওয়ার্ড' : 'Admin Access & Password', icon: <ShieldCheck className="h-4 w-4" /> },
     { id: 'students', label: language === 'bn' ? 'শিক্ষার্থীরা' : 'Students', icon: <Users className="h-4 w-4" /> },
-    { id: 'customize', label: language === 'bn' ? 'সাইট কাস্টমাইজ করুন' : 'Customize Website', icon: <Palette className="h-4 w-4" /> },
+    { id: 'customize', label: language === 'bn' ? 'যোগাযোগ ও ওয়েবসাইট' : 'Contacts & Website', icon: <Palette className="h-4 w-4" /> },
   ];
 
   const donutRadius = 54;
@@ -970,7 +1213,7 @@ export const AdminDashboard: React.FC = () => {
             <img
               src={appSettings.branding.logoUrl || BRAND_LOGO_PATH}
               alt="ASA,LEARN logo"
-              className="h-12 w-auto object-contain"
+              className={`h-14 w-auto object-contain transition ${getLogoContrastClass(appSettings.branding.logoUrl)}`}
             />
             <div className="min-w-0">
               <p className="truncate font-display text-sm font-bold text-[#172033] dark:text-white">
@@ -1050,8 +1293,8 @@ export const AdminDashboard: React.FC = () => {
                   </h2>
                   <p className="text-xs text-[#64748B] dark:text-slate-400">
                     {language === 'bn'
-                      ? 'এক ক্লিকে নতুন ক্লাস আপলোড করুন, অ্যাডমিন যুক্ত করুন বা ডেমো ডাটা মুছুন'
-                      : 'Upload classes quickly, manage co-admins, test AI 3D, or customize every part of the site'}
+                      ? 'সহজেই ক্লাস ও PDF আপলোড করুন, বিষয় সম্পাদনা করুন বা নতুন অ্যাডমিন যুক্ত করুন'
+                      : 'Upload or edit classes & PDFs, manage compulsory/optional subjects, or manage team admins'}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1061,28 +1304,28 @@ export const AdminDashboard: React.FC = () => {
                     className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    <span>{language === 'bn' ? 'ক্লাস আপলোড' : 'Upload Class'}</span>
+                    <span>{language === 'bn' ? 'ক্লাস ও PDF' : 'Add Class / PDF'}</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => setTab('admins')}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold text-[#172554] hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
                   >
-                    <UserPlus className="h-3.5 w-3.5" />
-                    <span>{language === 'bn' ? 'অ্যাডমিন দিন' : 'Grant Admin'}</span>
+                    <KeyRound className="h-3.5 w-3.5" />
+                    <span>{language === 'bn' ? 'পাসওয়ার্ড ও অ্যাডমিন' : 'Admins & Password'}</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => navigate('/3d-lab')}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm hover:opacity-95"
+                    onClick={() => setTab('customize')}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold text-[#172554] hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
                   >
-                    <Box className="h-3.5 w-3.5" />
-                    <span>{language === 'bn' ? 'AI ৩ডি ল্যাব' : 'Test AI 3D Lab'}</span>
+                    <Phone className="h-3.5 w-3.5" />
+                    <span>{language === 'bn' ? 'ফুটার যোগাযোগ' : 'Footer Contacts'}</span>
                   </button>
                 </div>
               </div>
 
-              {/* KPI Gradient Cards */}
+              {/* KPI Cards */}
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-3xl bg-gradient-to-br from-[#172554] to-[#263B91] p-5 text-white shadow-lg">
                   <div className="flex items-center justify-between">
@@ -1095,11 +1338,11 @@ export const AdminDashboard: React.FC = () => {
 
                 <div className="rounded-3xl bg-gradient-to-br from-sky-600 to-cyan-500 p-5 text-white shadow-lg">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-sky-100">Lessons</span>
+                    <span className="text-xs font-medium text-sky-100">Lessons & PDFs</span>
                     <Video className="h-5 w-5 text-sky-100" />
                   </div>
                   <p className="font-mono-nums mt-3 text-3xl font-bold">{lessons.length}</p>
-                  <p className="mt-1 text-[11px] text-sky-50/90">{lessons3dCount} with 3D Lab</p>
+                  <p className="mt-1 text-[11px] text-sky-50/90">{resources.length} study PDFs/notes</p>
                 </div>
 
                 <div className="rounded-3xl bg-gradient-to-br from-indigo-600 to-violet-600 p-5 text-white shadow-lg">
@@ -1108,7 +1351,9 @@ export const AdminDashboard: React.FC = () => {
                     <BookOpen className="h-5 w-5 text-indigo-100" />
                   </div>
                   <p className="font-mono-nums mt-3 text-3xl font-bold">{subjects.length}</p>
-                  <p className="mt-1 text-[11px] text-indigo-100/90">{classes.length} classes · {totalQuestionsCount} MCQs</p>
+                  <p className="mt-1 text-[11px] text-indigo-100/90">
+                    {classes.length} classes · {totalQuestionsCount} MCQs
+                  </p>
                 </div>
 
                 <div className="rounded-3xl bg-gradient-to-br from-emerald-600 to-teal-500 p-5 text-white shadow-lg">
@@ -1216,253 +1461,758 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Recent Activity Logs */}
-              <div className="glass-surface rounded-3xl p-6">
-                <div className="flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-[#263B91] dark:text-[#BFE8FF]" />
-                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">Recent Activity</h3>
-                </div>
-                <div className="mt-3 space-y-2 text-xs">
-                  {logs.slice(0, 6).map((log) => (
-                    <div
-                      key={log.logId}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/75 px-3.5 py-2 dark:bg-slate-900/60"
+              {/* Active Notices + Recent Activity */}
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+                <div className="glass-surface rounded-3xl p-6">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                      Announcements ({announcements.length})
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEntityType('announcement');
+                        resetEntityForm();
+                        setTab('curriculum');
+                      }}
+                      className="text-xs font-bold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
                     >
-                      <span>
-                        <strong>{log.actorName || log.actorId}</strong> · {log.action} · {log.target}
-                      </span>
-                      <span className="text-[11px] text-[#64748B]">{formatTimestamp(log.timestamp)}</span>
-                    </div>
-                  ))}
-                  {logs.length === 0 && <p className="text-[#64748B]">No recent actions logged yet.</p>}
+                      + Add Notice
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2 text-xs">
+                    {announcements.map((a) => (
+                      <div key={a.announcementId} className="flex items-center justify-between gap-2 rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60">
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold text-[#172033] dark:text-white">{a.title}</p>
+                          <p className="truncate text-[11px] text-[#64748B]">{a.content}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditEntity('announcement', a as unknown as Record<string, unknown>)}
+                            className="rounded-lg p-1 text-[#263B91] hover:bg-[#E7F5FF] dark:text-[#BFE8FF]"
+                            title="Edit Notice"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteContent('announcements', a.announcementId, a.title)}
+                            className="rounded-lg p-1 text-red-500 hover:bg-red-50"
+                            title="Delete Notice"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {announcements.length === 0 && <p className="text-[#64748B]">No notices posted yet.</p>}
+                  </div>
+                </div>
+
+                <div className="glass-surface rounded-3xl p-6">
+                  <div className="flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-[#263B91] dark:text-[#BFE8FF]" />
+                    <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">Recent Activity</h3>
+                  </div>
+                  <div className="mt-3 space-y-2 text-xs">
+                    {logs.slice(0, 6).map((log) => (
+                      <div
+                        key={log.logId}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/75 px-3.5 py-2 dark:bg-slate-900/60"
+                      >
+                        <span>
+                          <strong>{log.actorName || log.actorId}</strong> · {log.action} · {log.target}
+                        </span>
+                        <span className="text-[11px] text-[#64748B]">{formatTimestamp(log.timestamp)}</span>
+                      </div>
+                    ))}
+                    {logs.length === 0 && <p className="text-[#64748B]">No recent actions logged yet.</p>}
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          {/* TAB 2: ULTRA-SIMPLE CLASS / LESSON UPLOAD & CLEAR DEMOS */}
+          {/* TAB 2: LESSONS (ADD / EDIT / DELETE) + STUDY PDF RESOURCES */}
           {tab === 'videos' && (
             <div className="space-y-6">
-              <form onSubmit={handleAddLesson} className="glass-surface space-y-4 rounded-3xl p-6">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="font-display text-lg font-bold text-[#172033] dark:text-white">
-                      {language === 'bn' ? '+ সহজ ক্লাস / ভিডিও আপলোড' : '+ Easy Class & Video Upload'}
-                    </h2>
-                    <p className="text-[11px] text-[#64748B] dark:text-slate-400">
-                      {language === 'bn'
-                        ? 'শুধু শ্রেণি, বিষয় এবং ক্লাসের নাম দিন — অধ্যায়, টপিক, বিবরণ সব ঐচ্ছিক।'
-                        : 'Only Class, Subject, and Lesson Title are required. Everything else (Chapter, Topic, Description, Category) is optional.'}
-                    </p>
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                {/* Left 7 Cols: Upload OR Edit Lesson */}
+                <form onSubmit={handleSaveLesson} className="glass-surface space-y-5 rounded-3xl p-6 lg:col-span-7">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#172554]/10 pb-3.5 dark:border-white/10">
+                    <div>
+                      <h2 className="font-display text-lg font-extrabold text-[#172033] dark:text-white">
+                        {editingLessonId
+                          ? language === 'bn'
+                            ? 'লেসন সম্পাদনা করুন (Edit Lesson)'
+                            : 'Edit Uploaded Lesson'
+                          : language === 'bn'
+                            ? '১. শ্রেণি ও বিষয় নির্বাচন'
+                            : '1. Select Target Curriculum'}
+                      </h2>
+                      <p className="text-[11px] text-[#64748B] dark:text-slate-400">
+                        {editingLessonId
+                          ? 'Update any details below and click Save Changes.'
+                          : language === 'bn'
+                            ? 'পাবলিশ করলেই সাথে সাথে AI স্বয়ংক্রিয় MCQ ও সৃজনশীল প্রশ্ন তৈরি করবে'
+                            : 'AI automatically creates MCQs & Creative Questions when publishing a new lesson.'}
+                      </p>
+                    </div>
+                    {editingLessonId && (
+                      <button
+                        type="button"
+                        onClick={resetLessonForm}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#172554]/20 px-3 py-1.5 text-xs font-semibold text-[#172554] dark:border-white/20 dark:text-[#BFE8FF]"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        <span>Cancel Edit</span>
+                      </button>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/3d-lab')}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-sky-500/30 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-100 dark:bg-sky-950/40 dark:text-sky-300"
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                    <span>{language === 'bn' ? 'AI ৩ডি প্রিভিউ' : 'Open AI 3D Lab'}</span>
-                  </button>
-                </div>
 
-                {/* Essential 4 Fields */}
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <select
-                    value={vidClassId}
-                    onChange={(e) => setVidClassId(e.target.value)}
-                    aria-label="Select Class"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  >
-                    {classes.map((c) => (
-                      <option key={c.classId} value={c.classId}>
-                        {language === 'bn' ? c.titleBn : c.title}
-                      </option>
-                    ))}
-                  </select>
+                  {/* Step 1: Class, Optional Group Filter, Subject, Learning Mode */}
+                  <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Class (শ্রেণি)
+                      </label>
+                      <select
+                        value={vidClassId}
+                        onChange={(e) => setVidClassId(e.target.value)}
+                        aria-label="Select Class"
+                        className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                      >
+                        {classes.map((c) => (
+                          <option key={c.classId} value={c.classId}>
+                            {c.title} ({c.titleBn})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                  <select
-                    value={vidSubjectId}
-                    onChange={(e) => setVidSubjectId(e.target.value)}
-                    aria-label="Select Subject"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  >
-                    {subjectsForVidClass.map((s) => (
-                      <option key={s.subjectId} value={s.subjectId}>
-                        {language === 'bn' ? `${s.titleBn} (${s.title})` : `${s.title} (${s.titleBn})`}
-                      </option>
-                    ))}
-                  </select>
-
-                  <input
-                    type="text"
-                    required
-                    value={vidTitle}
-                    onChange={(e) => setVidTitle(e.target.value)}
-                    placeholder={language === 'bn' ? 'ক্লাস বা লেসনের নাম লিখুন *' : 'Lesson / Class Title (Required) *'}
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-
-                  <input
-                    type="text"
-                    value={vidUrl}
-                    onChange={(e) => setVidUrl(e.target.value)}
-                    placeholder={language === 'bn' ? 'YouTube বা ভিডিও লিংক (ঐচ্ছিক)' : 'Video / YouTube URL (Optional)'}
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-
-                {/* AI Auto-Fill Strip */}
-                <div className="flex flex-col gap-2 rounded-2xl border border-sky-500/20 bg-[#E7F5FF]/70 p-3 sm:flex-row dark:border-sky-400/20 dark:bg-slate-900/70">
-                  <input
-                    type="text"
-                    value={vidAiTopic}
-                    onChange={(e) => setVidAiTopic(e.target.value)}
-                    placeholder={
-                      language === 'bn'
-                        ? 'AI দিয়ে বাকি সব পূরণ করতে টপিক লিখুন (ঐচ্ছিক)...'
-                        : 'Optional AI Auto-Fill: type a topic idea to generate Bangla title, notes & quiz...'
-                    }
-                    className="flex-1 rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <button
-                    type="button"
-                    disabled={vidAiBusy}
-                    onClick={() => void handleAiAutofillLesson()}
-                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#172554] to-[#0284C7] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-95 disabled:opacity-50"
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span>{vidAiBusy ? 'Generating...' : 'AI Auto-Fill'}</span>
-                  </button>
-                </div>
-
-                {/* Collapsible Optional Fields */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setShowOptionalLessonFields((v) => !v)}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
-                  >
-                    {showOptionalLessonFields ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                    <span>
-                      {language === 'bn'
-                        ? 'ঐচ্ছিক তথ্য (বাংলা নাম, অধ্যায়, ক্যাটাগরি, ৩ডি মোড, বিবরণ)'
-                        : 'Optional Details (Bangla Title, Chapter, Topic, Category, 3D Mode, Description)'}
-                    </span>
-                  </button>
-
-                  {showOptionalLessonFields && (
-                    <div className="mt-3 space-y-3 rounded-2xl bg-white/65 p-4 dark:bg-slate-900/50">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <input
-                          type="text"
-                          value={vidTitleBn}
-                          onChange={(e) => setVidTitleBn(e.target.value)}
-                          placeholder="Bangla Title (Optional)"
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                        />
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Filter Group (ঐচ্ছিক)
+                      </label>
+                      {isVidSenior ? (
                         <select
-                          value={vidCategory}
-                          onChange={(e) => setVidCategory(e.target.value)}
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          value={vidGroupId}
+                          onChange={(e) => setVidGroupId(e.target.value as 'all' | Exclude<SubjectGroup, 'common'>)}
+                          aria-label="Filter Group"
+                          className="min-h-[42px] w-full rounded-xl border border-[#263B91]/30 bg-[#E7F5FF]/70 px-3.5 py-2 text-xs font-semibold text-[#172554] dark:border-[#BFE8FF]/25 dark:bg-slate-800 dark:text-[#BFE8FF]"
                         >
-                          {categories.map((cat) => (
-                            <option key={cat.categoryId} value={cat.categoryId}>
-                              Category: {cat.title}
+                          <option value="all">All Subjects (Compulsory + Optional)</option>
+                          {GROUP_OPTIONS.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.titleEn} ({g.titleBn})
                             </option>
                           ))}
                         </select>
+                      ) : (
+                        <div className="flex min-h-[42px] items-center rounded-xl border border-[#172554]/10 bg-slate-100/80 px-3.5 py-2 text-xs font-medium text-[#64748B] dark:border-white/10 dark:bg-slate-900/60 dark:text-slate-400">
+                          {language === 'bn' ? 'সকল বিষয়' : 'All Subjects'}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Subject (বিষয়)
+                      </label>
+                      <select
+                        value={vidSubjectId}
+                        onChange={(e) => setVidSubjectId(e.target.value)}
+                        aria-label="Select Subject"
+                        className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                      >
+                        {subjectsForVidClass.map((s) => (
+                          <option key={s.subjectId} value={s.subjectId}>
+                            {s.title} ({s.titleBn}) {s.isOptional ? '[Optional]' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Learning Mode
+                      </label>
+                      <select
+                        value={vidCategory === 'one_shot' ? 'one_shot' : 'basic_to_pro'}
+                        onChange={(e) => setVidCategory(e.target.value as LessonCategory)}
+                        aria-label="Select Learning Mode"
+                        className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                      >
+                        <option value="basic_to_pro">Basic to Pro (Chapter-wise)</option>
+                        <option value="one_shot">One-Shot Revision (Exam-Night)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Inline Chapter Picker */}
+                  {vidCategory !== 'one_shot' ? (
+                    <div className="space-y-3 rounded-2xl border border-[#172554]/10 bg-white/75 p-4 dark:border-white/10 dark:bg-slate-900/50">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-[#172554] dark:text-[#BFE8FF]">
+                          {language === 'bn' ? 'অধ্যায় বাছাই বা নতুন অধ্যায় যোগ (ঐচ্ছিক)' : 'Select or Create Chapter (Optional)'}
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setIsAddingNewChapter((prev) => !prev)}
+                          className="inline-flex items-center gap-1 rounded-lg bg-[#E7F5FF] px-2.5 py-1 text-xs font-bold text-[#172554] transition hover:bg-[#BFE8FF] dark:bg-slate-800 dark:text-[#BFE8FF]"
+                        >
+                          {isAddingNewChapter ? (
+                            <span>{language === 'bn' ? 'বিদ্যমান অধ্যায় বাছাই' : 'Choose Existing Chapter'}</span>
+                          ) : (
+                            <>
+                              <FolderPlus className="h-3.5 w-3.5" />
+                              <span>{language === 'bn' ? '+ নতুন অধ্যায় যোগ' : '+ Add New Chapter'}</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {!isAddingNewChapter ? (
                         <select
                           value={vidChapterId}
                           onChange={(e) => setVidChapterId(e.target.value)}
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs font-semibold dark:border-white/15 dark:bg-slate-800 dark:text-white"
                         >
-                          <option value="">No Specific Chapter (Show Directly Under Subject)</option>
+                          <option value="">Direct Under Subject (General / Core)</option>
                           {chaptersForVidSubject.map((ch) => (
                             <option key={ch.chapterId} value={ch.chapterId}>
-                              Chapter: {ch.title}
+                              {ch.title} ({ch.titleBn})
                             </option>
                           ))}
                         </select>
-                        <select
-                          value={vidTopicId}
-                          onChange={(e) => setVidTopicId(e.target.value)}
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                        >
-                          <option value="">General Topic (Optional)</option>
-                          {topics
-                            .filter((tp) => !vidChapterId || tp.chapterId === vidChapterId)
-                            .map((tp) => (
-                              <option key={tp.topicId} value={tp.topicId}>
-                                Topic: {tp.title}
-                              </option>
-                            ))}
-                        </select>
-                        <select
-                          value={vidDifficulty}
-                          onChange={(e) => setVidDifficulty(e.target.value as DifficultyLevel)}
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                        >
-                          <option value="beginner">Beginner</option>
-                          <option value="intermediate">Intermediate</option>
-                          <option value="advanced">Advanced</option>
-                        </select>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                          <input
+                            type="text"
+                            placeholder="New Chapter Title (e.g. Chapter 2: Motion)"
+                            value={newChapterTitle}
+                            onChange={(e) => setNewChapterTitle(e.target.value)}
+                            className="min-h-[40px] rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Bangla Chapter Name (ঐচ্ছিক)"
+                            value={newChapterTitleBn}
+                            onChange={(e) => setNewChapterTitleBn(e.target.value)}
+                            className="min-h-[40px] rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-amber-300/60 bg-amber-50/70 p-4 dark:border-amber-500/30 dark:bg-amber-950/25">
+                      <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                        One-Shot Badge Label
+                      </label>
+                      <input
+                        type="text"
+                        value={oneShotTag}
+                        onChange={(e) => setOneShotTag(e.target.value)}
+                        placeholder="e.g. Exam Night Special / Full Book Crash"
+                        className="min-h-[40px] w-full rounded-xl border border-amber-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#172033] dark:border-amber-500/30 dark:bg-slate-900 dark:text-white"
+                      />
+                    </div>
+                  )}
+
+                  {/* Step 2: YouTube URL + Title + Notes */}
+                  <div className="space-y-4 border-t border-[#172554]/10 pt-4 dark:border-white/10">
+                    <h3 className="font-display text-base font-extrabold text-[#172033] dark:text-white">
+                      {language === 'bn' ? '২. YouTube লিংক ও পাঠের বিবরণ' : '2. Video Link & Lesson Details'}
+                    </h3>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        YouTube Video URL (Optional — leave blank for study-notes only)
+                      </label>
+                      <div className="relative">
+                        <Youtube className="pointer-events-none absolute left-3.5 top-3 h-4 w-4 text-rose-500" />
+                        <input
+                          type="text"
+                          value={vidUrl}
+                          onChange={(e) => setVidUrl(e.target.value)}
+                          placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/..."
+                          className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white py-2 pl-10 pr-4 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                        />
+                      </div>
+
+                      {vidUrl.trim() && (
+                        <div className="mt-2.5">
+                          {extractedVidYtId ? (
+                            <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-50/75 p-2.5 dark:bg-emerald-950/35">
+                              <img
+                                src={`https://img.youtube.com/vi/${extractedVidYtId}/mqdefault.jpg`}
+                                alt="YouTube Thumbnail Preview"
+                                referrerPolicy="no-referrer"
+                                className="h-14 w-24 shrink-0 rounded-lg bg-slate-900 object-cover"
+                              />
+                              <div className="min-w-0">
+                                <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                                  <Check className="h-3.5 w-3.5" /> Valid YouTube ID Detected
+                                </span>
+                                <p className="mt-0.5 font-mono text-xs text-[#64748B] dark:text-slate-400">
+                                  ID: <span className="font-bold text-[#172033] dark:text-white">{extractedVidYtId}</span>
+                                </p>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-xs font-medium text-amber-600 dark:text-amber-300">
+                              Paste a valid YouTube link or MP4 URL.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <div className="sm:col-span-2">
+                        <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                          Lesson Title *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={vidTitle}
+                          onChange={(e) => setVidTitle(e.target.value)}
+                          placeholder={language === 'bn' ? 'ক্লাস বা লেসনের নাম লিখুন *' : 'e.g. Equations of Motion Full Lecture *'}
+                          className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                          Duration (mins)
+                        </label>
                         <input
                           type="number"
                           min={1}
                           value={vidDuration}
                           onChange={(e) => setVidDuration(Number(e.target.value))}
-                          placeholder="Duration mins"
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                         />
-                        <select
-                          value={vidStatus}
-                          onChange={(e) => setVidStatus(e.target.value as PublishStatus)}
-                          className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                        >
-                          <option value="published">Published (Live Immediately)</option>
-                          <option value="draft">Save as Draft</option>
-                        </select>
-                        <div className="flex items-center gap-3 text-xs">
-                          <label className="flex items-center gap-1.5 font-semibold">
-                            <input type="checkbox" checked={vidHas3d} onChange={(e) => setVidHas3d(e.target.checked)} />
-                            <span>3D Mode</span>
-                          </label>
-                          {vidHas3d && (
-                            <select
-                              value={vidSceneType}
-                              onChange={(e) => setVidSceneType(e.target.value as ThreeDSceneType)}
-                              className="flex-1 rounded-xl border border-[#172554]/15 bg-white px-2.5 py-1.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                            >
-                              <option value="trigonometry_triangle">Trigonometry 3D</option>
-                              <option value="newton_orbit">Newton Gravity Orbit</option>
-                              <option value="algebra_geometry">Algebra Cube 3D</option>
-                              <option value="molecule_atom">Bohr Atom 3D</option>
-                            </select>
-                          )}
-                        </div>
                       </div>
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Short Study Notes / Description (Optional)
+                      </label>
                       <textarea
                         rows={2}
                         value={vidDesc}
                         onChange={(e) => setVidDesc(e.target.value)}
-                        placeholder="Short Description (Optional)"
+                        placeholder={
+                          language === 'bn'
+                            ? 'মূল সূত্র বা সংক্ষিপ্ত নোট লিখুন'
+                            : 'Key formulas, page numbers, or exam tips'
+                        }
                         className="w-full rounded-xl border border-[#172554]/15 bg-white p-3 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                       />
                     </div>
+
+                    {/* AI Auto-Fill Strip */}
+                    {!editingLessonId && (
+                      <div className="flex flex-col gap-2 rounded-2xl border border-sky-500/20 bg-[#E7F5FF]/70 p-3 sm:flex-row dark:border-sky-400/20 dark:bg-slate-900/70">
+                        <input
+                          type="text"
+                          value={vidAiTopic}
+                          onChange={(e) => setVidAiTopic(e.target.value)}
+                          placeholder={
+                            language === 'bn'
+                              ? 'অথবা AI দিয়ে অটো-ফিল করতে টপিক লিখুন...'
+                              : 'Optional AI Auto-Fill: enter a topic idea to auto-fill title & notes...'
+                          }
+                          className="flex-1 rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                        />
+                        <button
+                          type="button"
+                          disabled={vidAiBusy}
+                          onClick={() => void handleAiAutofillLesson()}
+                          className="inline-flex min-h-[38px] items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-[#172554] to-[#0284C7] px-4 py-2 text-xs font-semibold text-white transition hover:opacity-95 disabled:opacity-50"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <span>{vidAiBusy ? 'Generating...' : 'AI Auto-Fill'}</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Collapsible Optional Fields */}
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setShowOptionalLessonFields((v) => !v)}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
+                      >
+                        {showOptionalLessonFields ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                        <span>
+                          {language === 'bn'
+                            ? 'ঐচ্ছিক অপশন (বাংলা নাম, নোট, ধাপ, ড্রাফট)'
+                            : 'Optional Settings (Bangla Title, Bangla Notes, Difficulty, Draft)'}
+                        </span>
+                      </button>
+
+                      {showOptionalLessonFields && (
+                        <div className="mt-3 grid grid-cols-1 gap-3 rounded-2xl bg-white/65 p-4 sm:grid-cols-2 dark:bg-slate-900/50">
+                          <input
+                            type="text"
+                            value={vidTitleBn}
+                            onChange={(e) => setVidTitleBn(e.target.value)}
+                            placeholder="Bangla Title (Optional)"
+                            className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          />
+                          <select
+                            value={vidDifficulty}
+                            onChange={(e) => setVidDifficulty(e.target.value as DifficultyLevel)}
+                            className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          >
+                            <option value="beginner">Difficulty: Beginner</option>
+                            <option value="intermediate">Difficulty: Intermediate</option>
+                            <option value="advanced">Difficulty: Advanced</option>
+                          </select>
+                          <input
+                            type="text"
+                            value={vidDescBn}
+                            onChange={(e) => setVidDescBn(e.target.value)}
+                            placeholder="Bangla Study Notes (Optional)"
+                            className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          />
+                          <select
+                            value={vidStatus}
+                            onChange={(e) => setVidStatus(e.target.value as PublishStatus)}
+                            className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                          >
+                            <option value="published">Published (Live Immediately)</option>
+                            <option value="draft">Save as Draft</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={savingBusy}
+                      className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl bg-[#172554] px-6 py-3 text-xs font-extrabold text-white shadow-md transition hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
+                    >
+                      <Plus className="h-4 w-4" />
+                      <span>
+                        {savingBusy
+                          ? 'Saving...'
+                          : editingLessonId
+                            ? language === 'bn'
+                              ? 'পরিবর্তন সেভ করুন'
+                              : 'Save Lesson Changes'
+                            : language === 'bn'
+                              ? 'পাবলিশ করুন'
+                              : 'Publish Lesson Live'}
+                      </span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* Right 5 Cols: Live Preview & Manage for Selected Subject */}
+                <div className="space-y-4 lg:col-span-5">
+                  <div className="glass-surface rounded-3xl p-5 sm:p-6">
+                    <div className="mb-4 border-b border-[#172554]/10 pb-3.5 dark:border-white/10">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-[#263B91] dark:text-[#BFE8FF]">
+                        {language === 'bn' ? 'লাইভ প্রিভিউ ও ম্যানেজ' : 'Live Preview & Edit'}
+                      </span>
+                      <h3 className="font-display mt-0.5 text-base font-extrabold text-[#172033] dark:text-white">
+                        {classes.find((c) => c.classId === vidClassId)?.title || vidClassId} •{' '}
+                        {subjectsForVidClass.find((s) => s.subjectId === vidSubjectId)?.title || vidSubjectId}
+                      </h3>
+                    </div>
+
+                    {/* Basic to Pro Chapters & Lessons */}
+                    <div className="mb-5 space-y-2.5">
+                      <h4 className="text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                        Basic to Pro Chapters ({chaptersForVidSubject.length})
+                      </h4>
+                      <div className="max-h-[280px] space-y-2.5 overflow-y-auto pr-1">
+                        {chaptersForVidSubject.length === 0 &&
+                        lessonsForVidSubject.filter((l) => l.category !== 'one_shot').length === 0 ? (
+                          <p className="rounded-xl border border-dashed border-[#172554]/15 p-3 text-xs text-[#64748B] dark:border-white/15 dark:text-slate-400">
+                            No Basic to Pro lessons in this subject yet.
+                          </p>
+                        ) : (
+                          <>
+                            {chaptersForVidSubject.map((ch) => {
+                              const chVids = lessonsForVidSubject.filter(
+                                (l) => l.chapterId === ch.chapterId && l.category !== 'one_shot'
+                              );
+                              return (
+                                <div
+                                  key={ch.chapterId}
+                                  className="rounded-2xl border border-[#172554]/10 bg-white/75 p-3 dark:border-white/10 dark:bg-slate-900/55"
+                                >
+                                  <div className="mb-2 flex items-center justify-between gap-2">
+                                    <p className="text-xs font-bold text-[#172033] dark:text-white">
+                                      {language === 'bn' ? ch.titleBn : ch.title}
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDeleteContent('chapters', ch.chapterId, ch.title)}
+                                      title="Delete chapter"
+                                      className="text-red-500/70 hover:text-red-600"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    {chVids.map((v) => (
+                                      <div
+                                        key={v.lessonId}
+                                        className="flex items-center justify-between gap-2 rounded-xl border border-[#172554]/10 bg-white px-3 py-2 text-xs dark:border-white/10 dark:bg-slate-800"
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => navigate(`/lesson/${v.lessonId}`)}
+                                          className="min-w-0 flex-1 truncate text-left font-medium text-[#172033] hover:underline dark:text-slate-100"
+                                        >
+                                          {v.title}
+                                        </button>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => startEditLesson(v)}
+                                            className="p-1 text-[#263B91] hover:text-[#172554] dark:text-[#BFE8FF]"
+                                            title="Edit lesson"
+                                          >
+                                            <Pencil className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => void handleDeleteContent('lessons', v.lessonId, v.title)}
+                                            className="p-1 text-slate-400 hover:text-rose-600"
+                                            title="Delete lesson"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {/* Direct Subject Lessons */}
+                            {lessonsForVidSubject
+                              .filter(
+                                (l) =>
+                                  l.category !== 'one_shot' &&
+                                  (!l.chapterId ||
+                                    l.chapterId === 'general' ||
+                                    !chaptersForVidSubject.some((c) => c.chapterId === l.chapterId))
+                              )
+                              .map((v) => (
+                                <div
+                                  key={v.lessonId}
+                                  className="flex items-center justify-between gap-2 rounded-xl border border-[#172554]/10 bg-white/90 px-3 py-2 text-xs dark:border-white/10 dark:bg-slate-800"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate(`/lesson/${v.lessonId}`)}
+                                    className="min-w-0 flex-1 truncate text-left font-medium text-[#172033] hover:underline dark:text-slate-100"
+                                  >
+                                    {v.title}
+                                  </button>
+                                  <div className="flex shrink-0 items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditLesson(v)}
+                                      className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                                      title="Edit lesson"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDeleteContent('lessons', v.lessonId, v.title)}
+                                      className="p-1 text-slate-400 hover:text-rose-600"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* One-Shot Revision Lessons */}
+                    <div className="space-y-2.5">
+                      <h4 className="text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">
+                        One-Shot Revision ({lessonsForVidSubject.filter((l) => l.category === 'one_shot').length})
+                      </h4>
+                      <div className="space-y-2">
+                        {lessonsForVidSubject.filter((l) => l.category === 'one_shot').length === 0 ? (
+                          <p className="rounded-xl border border-dashed border-amber-400/40 p-3 text-xs text-[#64748B] dark:text-slate-400">
+                            No One-Shot classes in this subject yet.
+                          </p>
+                        ) : (
+                          lessonsForVidSubject
+                            .filter((l) => l.category === 'one_shot')
+                            .map((os) => (
+                              <div
+                                key={os.lessonId}
+                                className="flex items-center justify-between gap-2 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs dark:border-amber-500/30 dark:bg-amber-950/30"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => navigate(`/lesson/${os.lessonId}`)}
+                                  className="min-w-0 flex-1 truncate text-left font-semibold text-[#172033] hover:underline dark:text-white"
+                                >
+                                  {os.title}
+                                </button>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditLesson(os)}
+                                    className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                                    title="Edit lesson"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteContent('lessons', os.lessonId, os.title)}
+                                    className="p-1 text-slate-400 hover:text-rose-600"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Study PDF & Note Resources Manager (Add / Edit / Delete) */}
+              <div className="glass-surface rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                      {editingResourceId
+                        ? 'Edit Study PDF / Note Resource'
+                        : language === 'bn'
+                          ? '+ স্টাডি PDF ও নোট লিংক যুক্ত করুন (AI টিউটর এটি সরাসরি ছাত্রদের দিবে)'
+                          : '+ Add Study PDF & Note Links (Auto-shared by Lesson Pages & AI Tutor)'}
+                    </h3>
+                  </div>
+                  {editingResourceId && (
+                    <button
+                      type="button"
+                      onClick={resetResourceForm}
+                      className="text-xs font-semibold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
+                    >
+                      Cancel Edit
+                    </button>
                   )}
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={savingBusy}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-6 py-2.5 text-xs font-bold text-white transition hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
-                >
-                  <Plus className="h-4 w-4" />
-                  <span>{savingBusy ? 'Publishing...' : language === 'bn' ? 'ক্লাস পাবলিশ করুন' : 'Publish Class / Lesson'}</span>
-                </button>
-              </form>
+                <form onSubmit={handleSaveResource} className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <input
+                    type="text"
+                    required
+                    value={resTitle}
+                    onChange={(e) => setResTitle(e.target.value)}
+                    placeholder="PDF / Note Title (EN) *"
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  />
+                  <input
+                    type="text"
+                    value={resTitleBn}
+                    onChange={(e) => setResTitleBn(e.target.value)}
+                    placeholder="Bangla Title (Optional)"
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  />
+                  <input
+                    type="url"
+                    required
+                    value={resUrl}
+                    onChange={(e) => setResUrl(e.target.value)}
+                    placeholder="Direct PDF / Drive URL *"
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  />
+                  <select
+                    value={resType}
+                    onChange={(e) => setResType(e.target.value as typeof resType)}
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  >
+                    <option value="PDF">PDF</option>
+                    <option value="Formula Sheet">Formula Sheet</option>
+                    <option value="Notes">Notes</option>
+                    <option value="Worksheet">Worksheet</option>
+                  </select>
+                  <select
+                    value={resLessonId}
+                    onChange={(e) => setResLessonId(e.target.value)}
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  >
+                    <option value="">General Study Note</option>
+                    {lessons.map((l) => (
+                      <option key={l.lessonId} value={l.lessonId}>
+                        {l.title} ({l.classId})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    disabled={savingBusy}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#172554] px-4 py-2 text-xs font-bold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554] sm:col-span-2 lg:col-span-5"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    <span>{editingResourceId ? 'Update Study Resource' : 'Publish PDF / Study Note Link'}</span>
+                  </button>
+                </form>
 
-              {/* All Lessons List + 1-Click Clear Demo Content */}
+                {resources.length > 0 && (
+                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {resources.map((r) => (
+                      <div
+                        key={r.resourceId}
+                        className="flex items-center justify-between gap-2 rounded-xl bg-white/80 px-3.5 py-2.5 text-xs dark:bg-slate-900/60"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold text-[#172033] dark:text-white">{r.title}</p>
+                          <p className="truncate text-[11px] text-[#64748B]">
+                            {r.fileType} · {r.fileUrl}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditResource(r)}
+                            className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                            title="Edit Resource"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteContent('resources', r.resourceId, r.title)}
+                            className="p-1 text-red-500"
+                            title="Delete Resource"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* All Lessons List + Edit + Delete + Clear Demos */}
               <div className="glass-surface rounded-3xl p-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
@@ -1507,7 +2257,7 @@ export const AdminDashboard: React.FC = () => {
                     <p className="py-6 text-center text-[#64748B] dark:text-slate-400">
                       {language === 'bn'
                         ? 'এখনো কোনো লেসন নেই। উপরের সহজ ফর্ম দিয়ে আপনার প্রথম ক্লাস আপলোড করুন!'
-                        : 'No lessons yet. Upload your first class using the quick form above!'}
+                        : 'No lessons yet. Upload your first class using the form above!'}
                     </p>
                   ) : (
                     lessons.map((l) => (
@@ -1516,19 +2266,20 @@ export const AdminDashboard: React.FC = () => {
                         className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-white/75 px-4 py-3 dark:bg-slate-900/60"
                       >
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <p className="truncate font-semibold text-[#172033] dark:text-white">{l.title}</p>
-                            {l.has3dMode && (
-                              <span className="rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-bold text-sky-700 dark:bg-sky-900/50 dark:text-sky-300">
-                                3D
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-[#64748B]">
-                            {l.classId} · {l.subjectId} · {l.youtubeUrl}
+                          <p className="truncate font-semibold text-[#172033] dark:text-white">{l.title}</p>
+                          <p className="truncate text-[11px] text-[#64748B]">
+                            {l.classId} · {l.subjectId} {l.youtubeUrl ? `· ${l.youtubeUrl}` : '· Study Notes Only'}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => startEditLesson(l)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-[#172554]/15 px-2.5 py-1 text-[11px] font-semibold text-[#172554] hover:bg-[#E7F5FF] dark:border-white/15 dark:text-[#BFE8FF]"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            <span>Edit</span>
+                          </button>
                           <button
                             type="button"
                             onClick={() => navigate(`/lesson/${l.lessonId}`)}
@@ -1564,7 +2315,7 @@ export const AdminDashboard: React.FC = () => {
             </div>
           )}
 
-          {/* TAB 3: SUBJECTS, OPTIONAL CHAPTERS, AI MODULE BUILDER & QUIZZES */}
+          {/* TAB 3: CLASSES, COMPULSORY/OPTIONAL SUBJECTS, CHAPTERS, NOTICES & QUIZZES */}
           {tab === 'curriculum' && (
             <div className="space-y-6">
               {/* AI One-Click Module Builder */}
@@ -1575,7 +2326,7 @@ export const AdminDashboard: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <Wand2 className="h-5 w-5 text-[#BFE8FF]" />
                   <h2 className="font-display text-lg font-bold">
-                    {language === 'bn' ? 'AI দিয়ে ১-ক্লিকে অধ্যায় ও ৩ডি মডিউল তৈরি করুন' : 'AI One-Click Curriculum Builder'}
+                    {language === 'bn' ? 'AI দিয়ে ১-ক্লিকে অধ্যায় ও কুইজ তৈরি করুন' : 'AI One-Click Curriculum Builder'}
                   </h2>
                 </div>
                 <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-4">
@@ -1584,7 +2335,7 @@ export const AdminDashboard: React.FC = () => {
                     required
                     value={aiModulePrompt}
                     onChange={(e) => setAiModulePrompt(e.target.value)}
-                    placeholder="Topic (e.g., Newton's Second Law or H2O Bonding)..."
+                    placeholder="Topic (e.g., Newton's Second Law or Trigonometry)..."
                     className="rounded-xl border border-white/25 bg-white/95 px-3.5 py-2.5 text-xs text-[#172033] sm:col-span-2"
                   />
                   <select
@@ -1618,31 +2369,49 @@ export const AdminDashboard: React.FC = () => {
                   className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#BFE8FF] px-5 py-2.5 text-xs font-bold text-[#172554] transition hover:bg-white disabled:opacity-50"
                 >
                   <Sparkles className="h-4 w-4" />
-                  <span>{aiModuleBusy ? 'Generating with Gemini...' : 'Generate Complete Module + 3D + Quiz'}</span>
+                  <span>{aiModuleBusy ? 'Generating with Gemini...' : 'Generate Complete Lesson & Quiz'}</span>
                 </button>
               </form>
 
-              {/* Add Subject / Category / Class / Optional Chapter / Topic / Announcement */}
-              <form onSubmit={handleCreateCurriculumItem} className="glass-surface space-y-4 rounded-3xl p-6">
-                <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                  {language === 'bn' ? '+ নতুন বিষয়, ক্যাটাগরি বা অধ্যায় যোগ করুন' : '+ Add Subject, Category, Class, Chapter, or Notice'}
-                </h3>
+              {/* Add OR Edit Subject / Class / Chapter / Announcement / Category */}
+              <form onSubmit={handleSaveCurriculumItem} className="glass-surface space-y-4 rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                    {editingEntityId
+                      ? `Edit ${entityType}`
+                      : language === 'bn'
+                        ? '+ নতুন বিষয়, শ্রেণি, অধ্যায় বা নোটিশ যোগ করুন'
+                        : '+ Add or Edit Subject, Class, Chapter, or Notice'}
+                  </h3>
+                  {editingEntityId && (
+                    <button
+                      type="button"
+                      onClick={resetEntityForm}
+                      className="inline-flex items-center gap-1 rounded-xl border border-[#172554]/20 px-3 py-1 text-xs font-semibold text-[#172554] dark:border-white/20 dark:text-[#BFE8FF]"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>Cancel Edit</span>
+                    </button>
+                  )}
+                </div>
 
                 <div className="flex flex-wrap gap-2">
                   {(
                     [
                       ['subject', 'Subject / বিষয়'],
+                      ['class', 'Class / শ্রেণি'],
+                      ['chapter', 'Chapter / অধ্যায়'],
+                      ['announcement', 'Notice / নোটিশ'],
                       ['category', 'Category'],
-                      ['class', 'Class'],
-                      ['chapter', 'Chapter (Optional)'],
-                      ['topic', 'Topic (Optional)'],
-                      ['announcement', 'Announcement'],
                     ] as const
                   ).map(([val, label]) => (
                     <button
                       key={val}
                       type="button"
-                      onClick={() => setEntityType(val)}
+                      onClick={() => {
+                        setEntityType(val);
+                        setEditingEntityId(null);
+                      }}
                       className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition ${
                         entityType === val
                           ? 'bg-[#172554] text-white dark:bg-[#BFE8FF] dark:text-[#172554]'
@@ -1660,25 +2429,27 @@ export const AdminDashboard: React.FC = () => {
                     required
                     value={entTitle}
                     onChange={(e) => setEntTitle(e.target.value)}
-                    placeholder={`Title (English) *`}
+                    placeholder="Title (English) *"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
                   <input
                     type="text"
                     value={entTitleBn}
                     onChange={(e) => setEntTitleBn(e.target.value)}
-                    placeholder={`Bangla Title (Optional)`}
+                    placeholder="Bangla Title (বাংলা নাম)"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
-                  <input
-                    type="number"
-                    min={1}
-                    value={entOrder}
-                    onChange={(e) => setEntOrder(Number(e.target.value))}
-                    placeholder="Order"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  {['subject', 'chapter', 'topic', 'announcement'].includes(entityType) && (
+                  {entityType !== 'announcement' && (
+                    <input
+                      type="number"
+                      min={1}
+                      value={entOrder}
+                      onChange={(e) => setEntOrder(Number(e.target.value))}
+                      placeholder="Order"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  )}
+                  {['subject', 'chapter'].includes(entityType) && (
                     <select
                       value={entClassId}
                       onChange={(e) => setEntClassId(e.target.value)}
@@ -1691,7 +2462,7 @@ export const AdminDashboard: React.FC = () => {
                       ))}
                     </select>
                   )}
-                  {['chapter', 'topic'].includes(entityType) && (
+                  {entityType === 'chapter' && (
                     <select
                       value={entSubjectId}
                       onChange={(e) => setEntSubjectId(e.target.value)}
@@ -1706,19 +2477,6 @@ export const AdminDashboard: React.FC = () => {
                         ))}
                     </select>
                   )}
-                  {entityType === 'topic' && (
-                    <select
-                      value={entChapterId}
-                      onChange={(e) => setEntChapterId(e.target.value)}
-                      className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                    >
-                      {chapters.map((ch) => (
-                        <option key={ch.chapterId} value={ch.chapterId}>
-                          {ch.title}
-                        </option>
-                      ))}
-                    </select>
-                  )}
                   {entityType === 'category' && (
                     <select
                       value={entIcon}
@@ -1727,11 +2485,55 @@ export const AdminDashboard: React.FC = () => {
                     >
                       <option value="layers">Icon: Layers</option>
                       <option value="zap">Icon: Bolt</option>
-                      <option value="box">Icon: 3D Cube</option>
-                      <option value="sparkles">Icon: Sparkles</option>
+                      <option value="book">Icon: Book</option>
                     </select>
                   )}
+                  {(entityType === 'announcement' || entityType === 'class' || entityType === 'category') && (
+                    <input
+                      type="text"
+                      value={entDesc}
+                      onChange={(e) => setEntDesc(e.target.value)}
+                      placeholder={entityType === 'announcement' ? 'Notice Content (EN)' : 'Description (Optional)'}
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs sm:col-span-2 dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  )}
+                  {entityType === 'announcement' && (
+                    <input
+                      type="text"
+                      value={entDescBn}
+                      onChange={(e) => setEntDescBn(e.target.value)}
+                      placeholder="Notice Content (Bangla)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  )}
                 </div>
+
+                {/* Subject Compulsory / Optional + Group Checkboxes */}
+                {entityType === 'subject' && (
+                  <div className="flex flex-wrap items-center gap-4 rounded-2xl bg-white/70 p-3.5 text-xs dark:bg-slate-900/50">
+                    <label className="flex items-center gap-2 font-bold text-[#172033] dark:text-white">
+                      <input
+                        type="checkbox"
+                        checked={entIsOptional}
+                        onChange={(e) => setEntIsOptional(e.target.checked)}
+                      />
+                      <span>Optional Subject (ঐচ্ছিক বিষয়)</span>
+                    </label>
+                    <div className="flex flex-wrap items-center gap-3 border-l border-[#172554]/10 pl-4 dark:border-white/10">
+                      <span className="font-semibold text-[#64748B]">Groups:</span>
+                      {(['common', 'science', 'arts', 'commerce'] as const).map((grp) => (
+                        <label key={grp} className="flex items-center gap-1 font-medium capitalize">
+                          <input
+                            type="checkbox"
+                            checked={entGroups.includes(grp)}
+                            onChange={() => toggleGroupSelection(grp)}
+                          />
+                          <span>{grp}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <button
                   type="submit"
@@ -1739,40 +2541,108 @@ export const AdminDashboard: React.FC = () => {
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
                 >
                   <Plus className="h-3.5 w-3.5" />
-                  <span>{savingBusy ? 'Saving...' : `Add ${entityType}`}</span>
+                  <span>{savingBusy ? 'Saving...' : editingEntityId ? `Save ${entityType} Changes` : `Add ${entityType}`}</span>
                 </button>
               </form>
 
-              {/* Active Bangladesh Subjects List with Delete */}
+              {/* Editable Classes List */}
               <div className="glass-surface rounded-3xl p-6">
                 <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                  {language === 'bn' ? 'সকল শ্রেণির বিষয় তালিকা' : 'Bangladesh NCTB Subjects'} ({subjects.length})
+                  Classes ({classes.length})
                 </h3>
-                <div className="mt-4 grid max-h-80 grid-cols-1 gap-2 overflow-y-auto pr-1 text-xs sm:grid-cols-2 lg:grid-cols-3">
-                  {subjects.map((s) => (
-                    <div
-                      key={s.subjectId}
-                      className="flex items-center justify-between gap-2 rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60"
-                    >
+                <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                  {classes.map((c) => (
+                    <div key={c.classId} className="flex items-center justify-between gap-2 rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60">
                       <div className="min-w-0">
-                        <p className="truncate font-semibold text-[#172033] dark:text-white">{s.title}</p>
-                        <p className="truncate text-[11px] text-[#64748B]">
-                          {s.classId} · {s.titleBn}
-                        </p>
+                        <p className="truncate font-bold text-[#172033] dark:text-white">{c.title}</p>
+                        <p className="truncate text-[11px] text-[#64748B]">{c.titleBn}</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteContent('subjects', s.subjectId, s.title)}
-                        className="shrink-0 text-red-500 hover:text-red-600"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => startEditEntity('class', c as unknown as Record<string, unknown>)}
+                          className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                          title="Edit Class"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteContent('classes', c.classId, c.title)}
+                          className="p-1 text-red-500"
+                          title="Delete Class"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* Categories, Chapters & Announcements Quick Delete */}
+              {/* Active Subjects List with Class Filter, Edit & Delete */}
+              <div className="glass-surface rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                    {language === 'bn' ? 'সকল শ্রেণির বিষয় তালিকা' : 'Bangladesh NCTB Subjects'} ({filteredAdminSubjects.length})
+                  </h3>
+                  <select
+                    value={subjectListClassFilter}
+                    onChange={(e) => setSubjectListClassFilter(e.target.value)}
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3 py-1.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  >
+                    <option value="all">All Classes ({subjects.length})</option>
+                    {classes.map((c) => (
+                      <option key={c.classId} value={c.classId}>
+                        {c.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mt-4 grid max-h-80 grid-cols-1 gap-2 overflow-y-auto pr-1 text-xs sm:grid-cols-2 lg:grid-cols-3">
+                  {filteredAdminSubjects.map((s) => (
+                    <div
+                      key={s.subjectId}
+                      className="flex items-center justify-between gap-2 rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-[#172033] dark:text-white">
+                          {s.title}{' '}
+                          {s.isOptional && (
+                            <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-bold text-amber-800">
+                              OPT
+                            </span>
+                          )}
+                        </p>
+                        <p className="truncate text-[11px] text-[#64748B]">
+                          {s.classId} · {s.titleBn}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => startEditEntity('subject', s as unknown as Record<string, unknown>)}
+                          className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                          title="Edit Subject"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteContent('subjects', s.subjectId, s.title)}
+                          className="p-1 text-red-500 hover:text-red-600"
+                          title="Delete Subject"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Categories & Chapters Edit/Delete */}
               <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                 <div className="glass-surface rounded-3xl p-6">
                   <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
@@ -1781,14 +2651,25 @@ export const AdminDashboard: React.FC = () => {
                   <div className="mt-3 space-y-2 text-xs">
                     {categories.map((cat) => (
                       <div key={cat.categoryId} className="flex items-center justify-between rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60">
-                        <span className="font-semibold">{cat.title} ({cat.titleBn})</span>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteContent('categories', cat.categoryId, cat.title)}
-                          className="text-red-500 hover:text-red-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        <span className="font-semibold">
+                          {cat.title} ({cat.titleBn})
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditEntity('category', cat as unknown as Record<string, unknown>)}
+                            className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteContent('categories', cat.categoryId, cat.title)}
+                            className="p-1 text-red-500 hover:text-red-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1796,31 +2677,30 @@ export const AdminDashboard: React.FC = () => {
 
                 <div className="glass-surface rounded-3xl p-6">
                   <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                    Chapters ({chapters.length}) & Notices ({announcements.length})
+                    Chapters ({chapters.length})
                   </h3>
                   <div className="mt-3 max-h-52 space-y-2 overflow-y-auto text-xs">
                     {chapters.map((ch) => (
                       <div key={ch.chapterId} className="flex items-center justify-between rounded-xl bg-white/75 px-3 py-2 dark:bg-slate-900/60">
-                        <span className="truncate font-medium">{ch.title}</span>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteContent('chapters', ch.chapterId, ch.title)}
-                          className="text-red-500 hover:text-red-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                    {announcements.map((a) => (
-                      <div key={a.announcementId} className="flex items-center justify-between rounded-xl bg-amber-50/75 px-3 py-2 dark:bg-amber-950/30">
-                        <span className="truncate font-medium">Notice: {a.title}</span>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteContent('announcements', a.announcementId, a.title)}
-                          className="text-red-500 hover:text-red-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        <span className="truncate font-medium">
+                          {ch.title} ({ch.classId})
+                        </span>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditEntity('chapter', ch as unknown as Record<string, unknown>)}
+                            className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteContent('chapters', ch.chapterId, ch.title)}
+                            className="p-1 text-red-500 hover:text-red-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1910,72 +2790,129 @@ export const AdminDashboard: React.FC = () => {
             </div>
           )}
 
-          {/* TAB 4: MULTI-ADMIN ACCESS & FIREBASE CLOUD SYNC */}
+          {/* TAB 4: SECURITY & PASSWORD + GRANT / REVOKE ADMIN ACCESS (NO GMAIL) */}
           {tab === 'admins' && (
             <div className="space-y-6">
-              {/* Firebase Connection Status Card */}
-              <div className="glass-surface rounded-3xl p-6">
-                <div className="flex flex-wrap items-center justify-between gap-4">
+              {/* Shared Admin Password Change */}
+              <form onSubmit={handleChangeAdminPasswordSubmit} className="glass-surface space-y-4 rounded-3xl p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#172554]/10 pb-4 dark:border-white/10">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#E7F5FF] text-[#172554] dark:bg-slate-800 dark:text-[#BFE8FF]">
-                      <Cloud className="h-5 w-5" />
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#172554] text-white dark:bg-[#BFE8FF] dark:text-[#172554]">
+                      <KeyRound className="h-5 w-5" />
                     </div>
                     <div>
                       <h2 className="font-display text-lg font-bold text-[#172033] dark:text-white">
-                        {language === 'bn' ? 'Firebase ক্লাউড ব্যাকএন্ড সংযোগ' : 'Firebase Firestore Cloud Connection'}
+                        {language === 'bn' ? 'নিরাপত্তা ও শেয়ার্ড পাসওয়ার্ড পরিবর্তন' : 'Security & Shared Password Settings'}
                       </h2>
                       <p className="text-xs text-[#64748B] dark:text-slate-400">
-                        Firestore Status:{' '}
-                        <strong className={firebaseConnected ? 'text-emerald-600' : 'text-amber-600'}>
-                          {firebaseConnected ? 'Online & Verified' : 'Connecting...'}
-                        </strong>
-                        {firebaseUser?.email ? ` · Signed in as ${firebaseUser.email}` : ''}
-                        {healthInfo.geminiConfigured ? ' · Gemini AI Connected' : ''}
+                        {language === 'bn'
+                          ? 'একাধিক অ্যাডমিন একসাথে শেয়ার্ড পাসওয়ার্ড ব্যবহার করে প্রবেশ করতে পারবেন এবং যেকোনো সময় এখান থেকে নতুন পাসওয়ার্ড সেট করা যাবে।'
+                          : 'Multiple team admins can sign in using the shared Admin password. Any logged-in admin can change it below at any time.'}
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    {!hasFirestoreAdminAuth && (
-                      <button
-                        type="button"
-                        onClick={() => void handleGoogleAdminUnlock()}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-4 py-2 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
-                      >
-                        <Cloud className="h-3.5 w-3.5" />
-                        <span>{language === 'bn' ? 'Google দিয়ে ক্লাউড সংযুক্ত করুন' : 'Connect Google Admin Auth'}</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void seedCurriculumFromAdmin()
-                          .then(() => notify('Full Bangladesh Curriculum & Settings pushed to Firestore!'))
-                          .catch((err) => notify(err instanceof Error ? err.message : 'Sync completed locally.'))
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-[#172554]/15 bg-white px-4 py-2 text-xs font-semibold text-[#172554] hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5" />
-                      <span>{language === 'bn' ? 'সব ডাটা Firestore-এ পুশ করুন' : 'Push Curriculum to Firestore'}</span>
-                    </button>
+                  <div className="rounded-xl border border-emerald-500/25 bg-emerald-50/80 px-3 py-1.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                    Multi-Admin Simultaneous Access
+                    {adminPasswordUpdatedAt ? ` · Updated ${formatTimestamp(adminPasswordUpdatedAt)}` : ''}
                   </div>
                 </div>
-              </div>
 
-              {/* Grant Admin Access Form */}
+                {passChangeError && (
+                  <p className="rounded-xl bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-700 dark:bg-red-950/50 dark:text-red-200">
+                    {passChangeError}
+                  </p>
+                )}
+                {passChangeSuccess && (
+                  <p className="rounded-xl bg-emerald-50 px-3.5 py-2.5 text-xs font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200">
+                    {passChangeSuccess}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div>
+                    <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                      Current Shared Password *
+                    </label>
+                    <input
+                      type={showChangePass ? 'text' : 'password'}
+                      required
+                      value={curAdminPass}
+                      onChange={(e) => setCurAdminPass(e.target.value)}
+                      placeholder="Current shared password"
+                      className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                      New Shared Password *
+                    </label>
+                    <input
+                      type={showChangePass ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      value={nextAdminPass}
+                      onChange={(e) => setNextAdminPass(e.target.value)}
+                      placeholder="New password (min 6 chars)"
+                      className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                      Confirm New Password *
+                    </label>
+                    <input
+                      type={showChangePass ? 'text' : 'password'}
+                      required
+                      value={confirmAdminPass}
+                      onChange={(e) => setConfirmAdminPass(e.target.value)}
+                      placeholder="Confirm new password"
+                      className="min-h-[42px] w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowChangePass((v) => !v)}
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
+                  >
+                    {showChangePass ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    <span>{showChangePass ? 'Hide Passwords' : 'Show Passwords'}</span>
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={passChangeLoading}
+                    className="inline-flex items-center gap-2 rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-bold text-white transition hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    <span>
+                      {passChangeLoading
+                        ? 'Saving New Shared Password...'
+                        : language === 'bn'
+                          ? 'শেয়ার্ড পাসওয়ার্ড আপডেট করুন'
+                          : 'Update Shared Admin Password'}
+                    </span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Grant Admin Access (Name + Passcode Only — No Gmail Required) */}
               <form onSubmit={handleGrantAdmin} className="glass-surface space-y-4 rounded-3xl p-6">
                 <div>
                   <h3 className="font-display text-lg font-bold text-[#172033] dark:text-white">
-                    {language === 'bn' ? '+ নতুন অ্যাডমিন অ্যাক্সেস দিন (মাল্টি-অ্যাডমিন)' : '+ Grant Admin Access (Multi-Admin)'}
+                    {language === 'bn' ? '+ নতুন অ্যাডমিন অ্যাক্সেস দিন (জিমেইল ছাড়াই)' : '+ Grant Admin Access (No Email Required)'}
                   </h3>
                   <p className="text-xs text-[#64748B] dark:text-slate-400">
                     {language === 'bn'
-                      ? 'আপনার পছন্দের যে কাউকে নাম, পাসওয়ার্ড ও চাইলে Google ইমেইল দিয়ে অ্যাডমিন বানান—যাতে একাধিক অ্যাডমিন একসাথে পোর্টাল চালাতে পারেন।'
-                      : 'Authorize additional admins with their own password and optional Google Email so multiple admins can manage ASA,LEARN simultaneously.'}
+                      ? 'যাকে অ্যাডমিন অ্যাক্সেস দিতে চান তার নাম ও একটি ব্যক্তিগত পাসকোড দিন—কোনো জিমেইল বা Google লগইনের প্রয়োজন নেই।'
+                      : 'Add team admins by Name and Passcode only — they unlock this portal immediately without any Gmail or external login.'}
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <input
                     type="text"
                     required
@@ -1985,19 +2922,12 @@ export const AdminDashboard: React.FC = () => {
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
                   <input
-                    type="email"
-                    value={newAdminEmail}
-                    onChange={(e) => setNewAdminEmail(e.target.value)}
-                    placeholder="Google Email (Optional)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
                     type="text"
                     required
                     minLength={6}
                     value={newAdminPass}
                     onChange={(e) => setNewAdminPass(e.target.value)}
-                    placeholder="Login Password (min 6 chars) *"
+                    placeholder="Admin Passcode (min 6 chars) *"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
                   <select
@@ -2016,11 +2946,11 @@ export const AdminDashboard: React.FC = () => {
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
                 >
                   <UserPlus className="h-4 w-4" />
-                  <span>{language === 'bn' ? 'অ্যাডমিন যোগ করুন' : 'Grant Admin Access'}</span>
+                  <span>{language === 'bn' ? 'অ্যাডমিন অ্যাক্সেস দিন' : 'Grant Admin Access'}</span>
                 </button>
               </form>
 
-              {/* Multi-Admin Registry Table */}
+              {/* Authorized Admins List (Pause / Activate / Revoke) */}
               <div className="glass-surface rounded-3xl p-6">
                 <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
                   {language === 'bn' ? 'অনুমোদিত অ্যাডমিন তালিকা' : 'Authorized Admins'} ({adminAccounts.length})
@@ -2047,7 +2977,9 @@ export const AdminDashboard: React.FC = () => {
                             {adm.active ? 'Active' : 'Paused'}
                           </span>
                         </div>
-                        <p className="text-[11px] text-[#64748B]">{adm.email || 'Password Login Admin'}</p>
+                        <p className="text-[11px] text-[#64748B]">
+                          {adm.isPrimary ? 'Primary Shared Admin Access' : 'Delegated Passcode Admin'}
+                        </p>
                       </div>
 
                       {!adm.isPrimary && (
@@ -2057,15 +2989,16 @@ export const AdminDashboard: React.FC = () => {
                             onClick={() => void handleToggleCoAdminActive(adm)}
                             className="rounded-lg border border-[#172554]/15 px-2.5 py-1 text-[11px] font-semibold hover:bg-[#E7F5FF] dark:border-white/15"
                           >
-                            {adm.active ? 'Pause' : 'Activate'}
+                            {adm.active ? 'Pause Access' : 'Activate'}
                           </button>
                           <button
                             type="button"
                             onClick={() => void handleRemoveCoAdmin(adm)}
-                            className="rounded-lg p-1 text-red-500 hover:bg-red-50"
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-500/20 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 dark:text-red-400"
                             title="Revoke Admin Access"
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>Revoke</span>
                           </button>
                         </div>
                       )}
@@ -2074,59 +3007,41 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Change Own Admin Password */}
-              <form onSubmit={handleChangeAdminPasswordSubmit} className="glass-surface max-w-xl space-y-4 rounded-3xl p-6">
-                <div className="flex items-center gap-2">
-                  <KeyRound className="h-4 w-4 text-[#172554] dark:text-[#BFE8FF]" />
-                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                    {language === 'bn' ? 'নিজের অ্যাডমিন পাসওয়ার্ড পরিবর্তন করুন' : 'Change Your Admin Password'}
-                  </h3>
+              {/* Cloud Sync Card */}
+              <div className="glass-surface rounded-3xl p-6">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#E7F5FF] text-[#172554] dark:bg-slate-800 dark:text-[#BFE8FF]">
+                      <Cloud className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                        {language === 'bn' ? 'ক্লাউড সিঙ্ক' : 'Firestore Cloud Sync'}
+                      </h2>
+                      <p className="text-xs text-[#64748B] dark:text-slate-400">
+                        Status:{' '}
+                        <strong className={firebaseConnected ? 'text-emerald-600' : 'text-amber-600'}>
+                          {firebaseConnected ? 'Online' : 'Local Mode'}
+                        </strong>
+                        {healthInfo.geminiConfigured ? ' · Gemini AI Ready' : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void seedCurriculumFromAdmin()
+                        .then(() => notify('Full Bangladesh Curriculum & Settings pushed to Firestore!'))
+                        .catch((err) => notify(err instanceof Error ? err.message : 'Sync completed locally.'))
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-[#172554]/15 bg-white px-4 py-2 text-xs font-semibold text-[#172554] hover:bg-[#E7F5FF] dark:border-white/15 dark:bg-slate-800 dark:text-[#BFE8FF]"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    <span>{language === 'bn' ? 'সব ডাটা সিঙ্ক করুন' : 'Push Curriculum to Firestore'}</span>
+                  </button>
                 </div>
-                {passChangeError && (
-                  <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/50 dark:text-red-200">
-                    {passChangeError}
-                  </p>
-                )}
-                {passChangeSuccess && (
-                  <p className="rounded-xl bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200">
-                    {passChangeSuccess}
-                  </p>
-                )}
-                <input
-                  type="password"
-                  required
-                  value={curAdminPass}
-                  onChange={(e) => setCurAdminPass(e.target.value)}
-                  placeholder="Current Password *"
-                  className="w-full rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                />
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <input
-                    type="password"
-                    required
-                    minLength={6}
-                    value={nextAdminPass}
-                    onChange={(e) => setNextAdminPass(e.target.value)}
-                    placeholder="New Password (min 6 chars) *"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="password"
-                    required
-                    value={confirmAdminPass}
-                    onChange={(e) => setConfirmAdminPass(e.target.value)}
-                    placeholder="Confirm New Password *"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={passChangeLoading}
-                  className="rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] dark:bg-[#BFE8FF] dark:text-[#172554]"
-                >
-                  {passChangeLoading ? 'Updating...' : 'Update Password'}
-                </button>
-              </form>
+              </div>
             </div>
           )}
 
@@ -2259,365 +3174,505 @@ export const AdminDashboard: React.FC = () => {
             </div>
           )}
 
-          {/* TAB 6: FULL WEBSITE CUSTOMIZATION (BRANDING, COLORS, HOMEPAGE, AI, FEATURES) */}
+          {/* TAB 6: CONTACTS MANAGER & FULL WEBSITE CUSTOMIZATION */}
           {tab === 'customize' && (
-            <form onSubmit={handleSaveSettings} className="space-y-6">
-              {/* Branding & Theme Colors */}
+            <div className="space-y-6">
+              {/* Dedicated Bottom Footer Contacts Manager (Add / Edit / Delete) */}
               <div className="glass-surface space-y-4 rounded-3xl p-6">
-                <h2 className="font-display text-lg font-bold text-[#172033] dark:text-white">
-                  {language === 'bn' ? 'ব্র্যান্ডিং, লোগো ও রঙ কাস্টমাইজ করুন' : 'Branding, Logo & Theme Colors'}
-                </h2>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <input
-                    type="text"
-                    value={draftSettings.branding.siteName}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, siteName: e.target.value } })
-                    }
-                    placeholder="Site Name"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.branding.logoUrl}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, logoUrl: e.target.value } })
-                    }
-                    placeholder="Logo URL (leave default or paste image URL)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.branding.taglineEn}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, taglineEn: e.target.value } })
-                    }
-                    placeholder="Tagline (EN)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.branding.taglineBn}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, taglineBn: e.target.value } })
-                    }
-                    placeholder="Tagline (BN)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.branding.contactEmail}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, contactEmail: e.target.value } })
-                    }
-                    placeholder="Contact Email"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.branding.footerTextEn}
-                    onChange={(e) =>
-                      setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, footerTextEn: e.target.value } })
-                    }
-                    placeholder="Footer Text"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-lg font-bold text-[#172033] dark:text-white">
+                      {language === 'bn' ? 'ফুটার যোগাযোগ তালিকা (Add / Edit / Delete)' : 'Footer "Contact Us" Directory'}
+                    </h2>
+                    <p className="text-xs text-[#64748B] dark:text-slate-400">
+                      {language === 'bn'
+                        ? 'এখানে যোগ বা সম্পাদনা করা সকল নাম, ইমেইল ও ফোন নম্বর কেবল ওয়েবসাইটের সবার নিচে Footer-এ দেখা যাবে।'
+                        : 'Add, edit, or delete support contacts displayed strictly inside the bottom Footer across all pages.'}
+                    </p>
+                  </div>
+                  {editingContactId && (
+                    <button
+                      type="button"
+                      onClick={resetContactEditor}
+                      className="text-xs font-semibold text-[#263B91] hover:underline dark:text-[#BFE8FF]"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
-                  <label className="block font-semibold">
-                    Primary Navy
-                    <input
-                      type="color"
-                      value={draftSettings.theme.primaryNavy}
-                      onChange={(e) =>
-                        setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, primaryNavy: e.target.value } })
-                      }
-                      className="mt-1 h-9 w-full rounded-lg"
-                    />
-                  </label>
-                  <label className="block font-semibold">
-                    Secondary Navy
-                    <input
-                      type="color"
-                      value={draftSettings.theme.secondaryNavy}
-                      onChange={(e) =>
-                        setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, secondaryNavy: e.target.value } })
-                      }
-                      className="mt-1 h-9 w-full rounded-lg"
-                    />
-                  </label>
-                  <label className="block font-semibold">
-                    Ice Blue
-                    <input
-                      type="color"
-                      value={draftSettings.theme.iceBlue}
-                      onChange={(e) =>
-                        setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, iceBlue: e.target.value } })
-                      }
-                      className="mt-1 h-9 w-full rounded-lg"
-                    />
-                  </label>
-                  <label className="block font-semibold">
-                    Light Blue
-                    <input
-                      type="color"
-                      value={draftSettings.theme.lightBlue}
-                      onChange={(e) =>
-                        setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, lightBlue: e.target.value } })
-                      }
-                      className="mt-1 h-9 w-full rounded-lg"
-                    />
-                  </label>
-                </div>
-              </div>
-
-              {/* Homepage Banners & Texts */}
-              <div className="glass-surface space-y-4 rounded-3xl p-6">
-                <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                  {language === 'bn' ? 'হোমপেজ হেডিং ও ব্যানার' : 'Homepage Copy & Visibility'}
-                </h3>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <input
                     type="text"
-                    value={draftSettings.homepageSettings.heroTitleEn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, heroTitleEn: e.target.value },
-                      })
-                    }
-                    placeholder="Hero Title (EN)"
+                    value={contactName}
+                    onChange={(e) => setContactName(e.target.value)}
+                    placeholder="Contact Name *"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
                   <input
                     type="text"
-                    value={draftSettings.homepageSettings.heroTitleBn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, heroTitleBn: e.target.value },
-                      })
-                    }
-                    placeholder="Hero Title (BN)"
+                    value={contactRole}
+                    onChange={(e) => setContactRole(e.target.value)}
+                    placeholder="Role (e.g. Admin / Support)"
+                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  />
+                  <input
+                    type="email"
+                    value={contactEmailInput}
+                    onChange={(e) => setContactEmailInput(e.target.value)}
+                    placeholder="Email Address"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
                   <input
                     type="text"
-                    value={draftSettings.homepageSettings.heroSubtitleEn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, heroSubtitleEn: e.target.value },
-                      })
-                    }
-                    placeholder="Hero Subtitle (EN)"
+                    value={contactPhoneInput}
+                    onChange={(e) => setContactPhoneInput(e.target.value)}
+                    placeholder="Phone Number"
                     className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
                   />
-                  <input
-                    type="text"
-                    value={draftSettings.homepageSettings.heroSubtitleBn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, heroSubtitleBn: e.target.value },
-                      })
-                    }
-                    placeholder="Hero Subtitle (BN)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.homepageSettings.announcementBannerEn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, announcementBannerEn: e.target.value },
-                      })
-                    }
-                    placeholder="Top Banner Text (EN)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="text"
-                    value={draftSettings.homepageSettings.announcementBannerBn}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        homepageSettings: { ...draftSettings.homepageSettings, announcementBannerBn: e.target.value },
-                      })
-                    }
-                    placeholder="Top Banner Text (BN)"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-
-                <div className="flex flex-wrap gap-4 text-xs">
-                  {(
-                    [
-                      ['showAnnouncementBanner', 'Announcement Banner'],
-                      ['showPopularSubjects', 'Categories / Subjects'],
-                      ['showBasicToPro', 'Featured Lessons'],
-                      ['showAiIntro', 'AI Tutor Strip'],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label key={key} className="flex items-center gap-2 font-medium">
-                      <input
-                        type="checkbox"
-                        checked={draftSettings.homepageSettings[key]}
-                        onChange={(e) =>
-                          setDraftSettings({
-                            ...draftSettings,
-                            homepageSettings: { ...draftSettings.homepageSettings, [key]: e.target.checked },
-                          })
-                        }
-                      />
-                      <span>{label}</span>
-                    </label>
-                  ))}
-                  <label className="flex items-center gap-2 font-semibold text-red-600 dark:text-red-400">
-                    <input
-                      type="checkbox"
-                      checked={draftSettings.featureFlags.maintenanceMode}
-                      onChange={(e) =>
-                        setDraftSettings({
-                          ...draftSettings,
-                          featureFlags: { ...draftSettings.featureFlags, maintenanceMode: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Maintenance Mode</span>
-                  </label>
-                </div>
-              </div>
-
-              {/* AI Tutor & Platform Flags */}
-              <div className="glass-surface space-y-4 rounded-3xl p-6">
-                <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
-                  {language === 'bn' ? 'AI টিউটর ও সনদ নিয়ন্ত্রণ' : 'AI Tutor & Certificate Settings'}
-                </h3>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <select
-                    value={draftSettings.aiSettings.model}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        aiSettings: {
-                          ...draftSettings.aiSettings,
-                          model: e.target.value as 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite',
-                        },
-                      })
-                    }
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  >
-                    <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (Smartest)</option>
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Fast)</option>
-                  </select>
-                  <input
-                    type="number"
-                    min={5}
-                    max={500}
-                    value={draftSettings.aiSettings.dailyQuotaPerStudent}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        aiSettings: { ...draftSettings.aiSettings, dailyQuotaPerStudent: Number(e.target.value) },
-                      })
-                    }
-                    placeholder="Daily AI Quota"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                  <input
-                    type="number"
-                    min={1}
-                    max={50}
-                    value={draftSettings.featureFlags.minLessonsForCertificate}
-                    onChange={(e) =>
-                      setDraftSettings({
-                        ...draftSettings,
-                        featureFlags: { ...draftSettings.featureFlags, minLessonsForCertificate: Number(e.target.value) },
-                      })
-                    }
-                    placeholder="Lessons for Certificate"
-                    className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                  />
-                </div>
-                <textarea
-                  rows={3}
-                  value={draftSettings.aiSettings.systemInstructions}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      aiSettings: { ...draftSettings.aiSettings, systemInstructions: e.target.value },
-                    })
-                  }
-                  placeholder="AI Tutor Instructions..."
-                  className="w-full rounded-xl border border-[#172554]/15 bg-white p-3 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
-                />
-                <div className="flex flex-wrap gap-4 text-xs">
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={draftSettings.aiSettings.enabled}
-                      onChange={(e) =>
-                        setDraftSettings({
-                          ...draftSettings,
-                          aiSettings: { ...draftSettings.aiSettings, enabled: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Enable AI Tutor & 3D Lab</span>
-                  </label>
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={draftSettings.aiSettings.allowVoiceTutor}
-                      onChange={(e) =>
-                        setDraftSettings({
-                          ...draftSettings,
-                          aiSettings: { ...draftSettings.aiSettings, allowVoiceTutor: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Enable AI Voice</span>
-                  </label>
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={draftSettings.aiSettings.allowPdfUpload}
-                      onChange={(e) =>
-                        setDraftSettings({
-                          ...draftSettings,
-                          aiSettings: { ...draftSettings.aiSettings, allowPdfUpload: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Allow PDF Uploads</span>
-                  </label>
-                  <label className="flex items-center gap-2 font-medium">
-                    <input
-                      type="checkbox"
-                      checked={draftSettings.featureFlags.certificatesEnabled}
-                      onChange={(e) =>
-                        setDraftSettings({
-                          ...draftSettings,
-                          featureFlags: { ...draftSettings.featureFlags, certificatesEnabled: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Enable Certificates</span>
-                  </label>
                 </div>
 
                 <button
-                  type="submit"
+                  type="button"
                   disabled={savingBusy}
-                  className="rounded-xl bg-[#172554] px-6 py-3 text-xs font-bold text-white transition hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
+                  onClick={() => void handleSaveContactEntry()}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#172554] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
                 >
-                  {savingBusy ? 'Saving...' : language === 'bn' ? 'সব পরিবর্তন সেভ করুন' : 'Save All Website Customizations'}
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>{editingContactId ? 'Update Contact' : 'Add Contact to Footer'}</span>
                 </button>
+
+                {/* Existing Footer Contact Cards */}
+                {(draftSettings.branding.contacts || []).length > 0 && (
+                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    {(draftSettings.branding.contacts || []).map((c) => (
+                      <div
+                        key={c.id}
+                        className="flex items-center justify-between gap-2 rounded-2xl border border-[#172554]/10 bg-white/80 px-4 py-3 text-xs dark:border-white/10 dark:bg-slate-900/60"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-bold text-[#172033] dark:text-white">
+                            {c.name} <span className="font-medium text-[#64748B]">· {c.role}</span>
+                          </p>
+                          <p className="truncate text-[11px] text-[#64748B]">
+                            {[c.email, c.phone].filter(Boolean).join(' · ')}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingContactId(c.id);
+                              setContactName(c.name);
+                              setContactRole(c.role || '');
+                              setContactEmailInput(c.email || '');
+                              setContactPhoneInput(c.phone || '');
+                            }}
+                            className="p-1 text-[#263B91] dark:text-[#BFE8FF]"
+                            title="Edit Contact"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteContactEntry(c.id)}
+                            className="p-1 text-red-500"
+                            title="Delete Contact"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            </form>
+
+              <form onSubmit={handleSaveSettings} className="space-y-6">
+                {/* Branding & Theme Colors */}
+                <div className="glass-surface space-y-4 rounded-3xl p-6">
+                  <h2 className="font-display text-lg font-bold text-[#172033] dark:text-white">
+                    {language === 'bn' ? 'ব্র্যান্ডিং, লোগো ও রঙ কাস্টমাইজ করুন' : 'Branding, Logo & Primary Contact Summary'}
+                  </h2>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <input
+                      type="text"
+                      value={draftSettings.branding.siteName}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, siteName: e.target.value } })
+                      }
+                      placeholder="Site Name"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.logoUrl}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, logoUrl: e.target.value } })
+                      }
+                      placeholder="Logo URL (leave default or paste image URL)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.taglineEn}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, taglineEn: e.target.value } })
+                      }
+                      placeholder="Tagline (EN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.taglineBn}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, taglineBn: e.target.value } })
+                      }
+                      placeholder="Tagline (BN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.footerTextEn}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, footerTextEn: e.target.value } })
+                      }
+                      placeholder="Footer description in English"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.footerTextBn}
+                      onChange={(e) =>
+                        setDraftSettings({ ...draftSettings, branding: { ...draftSettings.branding, footerTextBn: e.target.value } })
+                      }
+                      placeholder="Footer description in Bangla"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+
+                  {/* Quick Summary Contact Fields */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      value={draftSettings.branding.contactAdminNames || ''}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          branding: { ...draftSettings.branding, contactAdminNames: e.target.value },
+                        })
+                      }
+                      placeholder="Default Admin / Team Names"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="email"
+                      value={draftSettings.branding.contactEmail}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          branding: { ...draftSettings.branding, contactEmail: e.target.value },
+                        })
+                      }
+                      placeholder="Primary Support Email"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.branding.contactPhone}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          branding: { ...draftSettings.branding, contactPhone: e.target.value },
+                        })
+                      }
+                      placeholder="Primary Support Phone"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 text-xs sm:grid-cols-4">
+                    <label className="block font-semibold">
+                      Primary Navy
+                      <input
+                        type="color"
+                        value={draftSettings.theme.primaryNavy}
+                        onChange={(e) =>
+                          setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, primaryNavy: e.target.value } })
+                        }
+                        className="mt-1 h-9 w-full rounded-lg"
+                      />
+                    </label>
+                    <label className="block font-semibold">
+                      Secondary Navy
+                      <input
+                        type="color"
+                        value={draftSettings.theme.secondaryNavy}
+                        onChange={(e) =>
+                          setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, secondaryNavy: e.target.value } })
+                        }
+                        className="mt-1 h-9 w-full rounded-lg"
+                      />
+                    </label>
+                    <label className="block font-semibold">
+                      Ice Blue
+                      <input
+                        type="color"
+                        value={draftSettings.theme.iceBlue}
+                        onChange={(e) =>
+                          setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, iceBlue: e.target.value } })
+                        }
+                        className="mt-1 h-9 w-full rounded-lg"
+                      />
+                    </label>
+                    <label className="block font-semibold">
+                      Light Blue
+                      <input
+                        type="color"
+                        value={draftSettings.theme.lightBlue}
+                        onChange={(e) =>
+                          setDraftSettings({ ...draftSettings, theme: { ...draftSettings.theme, lightBlue: e.target.value } })
+                        }
+                        className="mt-1 h-9 w-full rounded-lg"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {/* Homepage Banners & Texts */}
+                <div className="glass-surface space-y-4 rounded-3xl p-6">
+                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                    {language === 'bn' ? 'হোমপেজ হেডিং ও ব্যানার' : 'Homepage Copy & Visibility'}
+                  </h3>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.heroTitleEn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, heroTitleEn: e.target.value },
+                        })
+                      }
+                      placeholder="Hero Title (EN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.heroTitleBn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, heroTitleBn: e.target.value },
+                        })
+                      }
+                      placeholder="Hero Title (BN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.heroSubtitleEn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, heroSubtitleEn: e.target.value },
+                        })
+                      }
+                      placeholder="Hero Subtitle (EN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.heroSubtitleBn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, heroSubtitleBn: e.target.value },
+                        })
+                      }
+                      placeholder="Hero Subtitle (BN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.announcementBannerEn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, announcementBannerEn: e.target.value },
+                        })
+                      }
+                      placeholder="Top Banner Text (EN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={draftSettings.homepageSettings.announcementBannerBn}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          homepageSettings: { ...draftSettings.homepageSettings, announcementBannerBn: e.target.value },
+                        })
+                      }
+                      placeholder="Top Banner Text (BN)"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-4 text-xs">
+                    {(
+                      [
+                        ['showAnnouncementBanner', 'Announcement Banner'],
+                        ['showPopularSubjects', 'Categories / Subjects'],
+                        ['showBasicToPro', 'Featured Lessons'],
+                        ['showAiIntro', 'AI Tutor Strip'],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <label key={key} className="flex items-center gap-2 font-medium">
+                        <input
+                          type="checkbox"
+                          checked={draftSettings.homepageSettings[key]}
+                          onChange={(e) =>
+                            setDraftSettings({
+                              ...draftSettings,
+                              homepageSettings: { ...draftSettings.homepageSettings, [key]: e.target.checked },
+                            })
+                          }
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                    <label className="flex items-center gap-2 font-semibold text-red-600 dark:text-red-400">
+                      <input
+                        type="checkbox"
+                        checked={draftSettings.featureFlags.maintenanceMode}
+                        onChange={(e) =>
+                          setDraftSettings({
+                            ...draftSettings,
+                            featureFlags: { ...draftSettings.featureFlags, maintenanceMode: e.target.checked },
+                          })
+                        }
+                      />
+                      <span>Maintenance Mode</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* AI Tutor & Platform Flags */}
+                <div className="glass-surface space-y-4 rounded-3xl p-6">
+                  <h3 className="font-display text-base font-bold text-[#172033] dark:text-white">
+                    {language === 'bn' ? 'AI টিউটর ও সনদ নিয়ন্ত্রণ' : 'AI Tutor & Certificate Settings'}
+                  </h3>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <select
+                      value={draftSettings.aiSettings.model}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          aiSettings: {
+                            ...draftSettings.aiSettings,
+                            model: e.target.value as 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite',
+                          },
+                        })
+                      }
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    >
+                      <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (Smartest)</option>
+                      <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Fast)</option>
+                    </select>
+                    <input
+                      type="number"
+                      min={5}
+                      max={500}
+                      value={draftSettings.aiSettings.dailyQuotaPerStudent}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          aiSettings: { ...draftSettings.aiSettings, dailyQuotaPerStudent: Number(e.target.value) },
+                        })
+                      }
+                      placeholder="Daily AI Quota"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={draftSettings.featureFlags.minLessonsForCertificate}
+                      onChange={(e) =>
+                        setDraftSettings({
+                          ...draftSettings,
+                          featureFlags: { ...draftSettings.featureFlags, minLessonsForCertificate: Number(e.target.value) },
+                        })
+                      }
+                      placeholder="Lessons for Certificate"
+                      className="rounded-xl border border-[#172554]/15 bg-white px-3.5 py-2.5 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                    />
+                  </div>
+                  <textarea
+                    rows={3}
+                    value={draftSettings.aiSettings.systemInstructions}
+                    onChange={(e) =>
+                      setDraftSettings({
+                        ...draftSettings,
+                        aiSettings: { ...draftSettings.aiSettings, systemInstructions: e.target.value },
+                      })
+                    }
+                    placeholder="AI Tutor Instructions..."
+                    className="w-full rounded-xl border border-[#172554]/15 bg-white p-3 text-xs dark:border-white/15 dark:bg-slate-800 dark:text-white"
+                  />
+                  <div className="flex flex-wrap gap-4 text-xs">
+                    <label className="flex items-center gap-2 font-medium">
+                      <input
+                        type="checkbox"
+                        checked={draftSettings.aiSettings.enabled}
+                        onChange={(e) =>
+                          setDraftSettings({
+                            ...draftSettings,
+                            aiSettings: { ...draftSettings.aiSettings, enabled: e.target.checked },
+                          })
+                        }
+                      />
+                      <span>Enable AI Tutor</span>
+                    </label>
+                    <label className="flex items-center gap-2 font-medium">
+                      <input
+                        type="checkbox"
+                        checked={draftSettings.aiSettings.allowVoiceTutor}
+                        onChange={(e) =>
+                          setDraftSettings({
+                            ...draftSettings,
+                            aiSettings: { ...draftSettings.aiSettings, allowVoiceTutor: e.target.checked },
+                          })
+                        }
+                      />
+                      <span>Enable AI Voice</span>
+                    </label>
+                    <label className="flex items-center gap-2 font-medium">
+                      <input
+                        type="checkbox"
+                        checked={draftSettings.featureFlags.certificatesEnabled}
+                        onChange={(e) =>
+                          setDraftSettings({
+                            ...draftSettings,
+                            featureFlags: { ...draftSettings.featureFlags, certificatesEnabled: e.target.checked },
+                          })
+                        }
+                      />
+                      <span>Enable Certificates</span>
+                    </label>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={savingBusy}
+                    className="rounded-xl bg-[#172554] px-6 py-3 text-xs font-bold text-white transition hover:bg-[#263B91] disabled:opacity-50 dark:bg-[#BFE8FF] dark:text-[#172554]"
+                  >
+                    {savingBusy ? 'Saving...' : language === 'bn' ? 'সব পরিবর্তন সেভ করুন' : 'Save All Website Customizations'}
+                  </button>
+                </div>
+              </form>
+            </div>
           )}
         </main>
       </div>

@@ -6,6 +6,7 @@ import { LanguageSelectorModal } from './components/LanguageSelectorModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { Navbar } from './components/Navbar';
 import { OfflineIndicator } from './components/PWAInstallButton';
+import { StudentProfileModal } from './components/StudentProfileModal';
 import { t } from './i18n/translations';
 import { AdminDashboard } from './pages/AdminDashboard';
 import { ForgotPasswordPage, LoginPage, RegisterPage } from './pages/AuthPages';
@@ -14,7 +15,7 @@ import { LandingPage } from './pages/LandingPage';
 import { LessonPlayerPage } from './pages/LessonPlayerPage';
 import { AboutPage, FeaturesPage, PolicyPage } from './pages/StaticPages';
 import { StudentDashboard } from './pages/StudentDashboard';
-import { Ai3DExplorerPage } from './pages/Ai3DExplorerPage';
+import { LeaderboardPage } from './pages/LeaderboardPage';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -79,7 +80,7 @@ const RouterView: React.FC = () => {
   if (route === '/' || route === '') return <LandingPage />;
   if (route.startsWith('/classes')) return <ClassDirectoryPage />;
   if (route.startsWith('/lesson/')) return <LessonPlayerPage />;
-  if (route.startsWith('/3d-lab')) return <Ai3DExplorerPage />;
+  if (route.startsWith('/leaderboard')) return <LeaderboardPage />;
   if (route === '/login') return <LoginPage />;
   if (route === '/register') return <RegisterPage />;
   if (route === '/forgot-password') return <ForgotPasswordPage />;
@@ -113,6 +114,7 @@ const AppShell: React.FC = () => {
 
       <MobileBottomNav />
       <LanguageSelectorModal />
+      <StudentProfileModal />
       <AiTutorWidget />
       <OfflineIndicator />
     </div>

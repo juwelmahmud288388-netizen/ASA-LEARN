@@ -5,39 +5,14 @@ export type AccountStatus = 'active' | 'suspended';
 export type LessonCategory = string;
 export type DifficultyLevel = 'beginner' | 'intermediate' | 'advanced';
 export type PublishStatus = 'published' | 'draft';
-export type ThreeDSceneType = 'trigonometry_triangle' | 'newton_orbit' | 'algebra_geometry' | 'molecule_atom' | 'ai_custom';
+export type SubjectGroup = 'common' | 'science' | 'arts' | 'commerce';
 
-export interface Ai3DObjectSpec {
-  id?: string;
-  label: string;
-  labelBn?: string;
-  kind: 'sphere' | 'box' | 'cylinder' | 'cone' | 'torus' | 'octahedron' | 'ring';
-  color: string;
-  position: [number, number, number];
-  scale: [number, number, number];
-  rotation?: [number, number, number];
-  motion?: 'static' | 'orbit' | 'spin' | 'oscillate' | 'explode';
-  motionSpeed?: number;
-  orbitRadius?: number;
-  metalness?: number;
-  roughness?: number;
-  opacity?: number;
-}
-
-export interface Ai3DSceneBlueprint {
-  topic: string;
-  title: string;
-  titleBn: string;
-  summary: string;
-  summaryBn: string;
-  keyPoints?: string[];
-  sliderLabel: string;
-  sliderLabelBn: string;
-  sliderMin?: number;
-  sliderMax?: number;
-  sliderDefault?: number;
-  backgroundColor?: string;
-  objects: Ai3DObjectSpec[];
+export interface ContactEntry {
+  id: string;
+  name: string;
+  role?: string;
+  email: string;
+  phone: string;
 }
 
 export interface AdminAccount {
@@ -75,10 +50,35 @@ export interface UserProfile {
   accountStatus: AccountStatus;
   dailyGoalMinutes?: number;
   streakDays?: number;
+  lastActiveDate?: string;
+  streakHistory?: string[];
+  xp?: number;
+  likesCount?: number;
+  badges?: string[];
+  trophies?: string[];
+  activeBorder?: string;
+  unlockedBorders?: string[];
   phoneNumber?: string;
   email?: string;
   createdAt: unknown;
   updatedAt: unknown;
+}
+
+export interface StudentPublicProfile {
+  uid: string;
+  studentId: string;
+  fullName: string;
+  classId: string;
+  streakDays: number;
+  xp: number;
+  completedLessonsCount: number;
+  quizScoreTotal: number;
+  likesCount: number;
+  likedByMe: boolean;
+  badges: string[];
+  trophies: string[];
+  activeBorder: string;
+  unlockedBorders: string[];
 }
 
 export interface ClassItem {
@@ -101,6 +101,8 @@ export interface SubjectItem {
   description?: string;
   descriptionBn?: string;
   order: number;
+  groups?: SubjectGroup[];
+  isOptional?: boolean;
   status: PublishStatus;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -152,8 +154,6 @@ export interface LessonItem {
   difficulty: DifficultyLevel;
   durationMinutes?: number;
   featured?: boolean;
-  has3dMode?: boolean;
-  threeDSceneType?: ThreeDSceneType;
   order: number;
   status: PublishStatus;
   createdAt?: unknown;
@@ -182,11 +182,22 @@ export interface QuizQuestion {
   explanationBn?: string;
 }
 
+export interface CreativeQuestion {
+  id: string;
+  stem: string;
+  stemBn?: string;
+  questions: string[];
+  questionsBn?: string[];
+  modelAnswer: string;
+  modelAnswerBn?: string;
+}
+
 export interface QuizItem {
   quizId: string;
   lessonId: string;
   title: string;
   questions: QuizQuestion[];
+  creativeQuestions?: CreativeQuestion[];
   status: PublishStatus;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -243,12 +254,20 @@ export interface FeedbackItem {
   createdAt: unknown;
 }
 
+export interface MatchedStudyResource {
+  resourceId: string;
+  lessonId: string;
+  title: string;
+  titleBn?: string;
+  fileUrl: string;
+  fileType: string;
+}
+
 export interface AiChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  mode?: string;
-  attachmentName?: string;
+  matchedResources?: MatchedStudyResource[];
   timestamp: string;
 }
 
@@ -281,8 +300,10 @@ export interface AppSettings {
     taglineEn: string;
     taglineBn: string;
     logoUrl: string;
+    contactAdminNames?: string;
     contactEmail: string;
     contactPhone: string;
+    contacts?: ContactEntry[];
     footerTextEn: string;
     footerTextBn: string;
   };

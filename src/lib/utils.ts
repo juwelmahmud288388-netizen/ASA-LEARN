@@ -69,3 +69,11 @@ export function formatTimestamp(ts: unknown, lang: 'bn' | 'en' = 'en'): string {
 }
 
 export const BRAND_LOGO_PATH = '/assets/aistudio/WhatsApp_Image_2026-11-14_at_8.27.31_PM-removebg-preview_2ccf5230.png';
+
+export function getLogoContrastClass(logoUrl?: string): string {
+  const isDefaultMark = !logoUrl || logoUrl.trim() === '' || logoUrl.trim() === BRAND_LOGO_PATH;
+  return isDefaultMark
+    ? 'transition-all duration-200 dark:brightness-0 dark:invert'
+    : 'transition-all duration-200 dark:rounded-xl dark:bg-white/95 dark:p-1';
+}
+

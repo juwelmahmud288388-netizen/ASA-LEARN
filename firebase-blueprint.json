@@ -40,6 +40,14 @@
         "accountStatus": { "type": "string", "enum": ["active", "suspended"] },
         "dailyGoalMinutes": { "type": "integer" },
         "streakDays": { "type": "integer" },
+        "lastActiveDate": { "type": "string", "maxLength": 20 },
+        "streakHistory": { "type": "array" },
+        "xp": { "type": "integer" },
+        "likesCount": { "type": "integer" },
+        "badges": { "type": "array" },
+        "trophies": { "type": "array" },
+        "activeBorder": { "type": "string", "maxLength": 64 },
+        "unlockedBorders": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -99,6 +107,8 @@
         "titleBn": { "type": "string", "minLength": 1, "maxLength": 120 },
         "description": { "type": "string", "maxLength": 500 },
         "descriptionBn": { "type": "string", "maxLength": 500 },
+        "groups": { "type": "array" },
+        "isOptional": { "type": "boolean" },
         "order": { "type": "integer" },
         "status": { "type": "string", "enum": ["published", "draft"] },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -165,7 +175,7 @@
     },
     "LessonItem": {
       "title": "LessonItem",
-      "description": "Video lesson with YouTube/demo URL, category, optional 3D mode, difficulty, and learning objectives.",
+      "description": "Video lesson with YouTube URL, category, difficulty, and learning objectives.",
       "type": "object",
       "properties": {
         "lessonId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -176,7 +186,7 @@
         "category": { "type": "string", "minLength": 1, "maxLength": 64 },
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "titleBn": { "type": "string", "minLength": 1, "maxLength": 200 },
-        "youtubeUrl": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "youtubeUrl": { "type": "string", "maxLength": 500 },
         "thumbnailUrl": { "type": "string", "maxLength": 500 },
         "description": { "type": "string", "maxLength": 2000 },
         "descriptionBn": { "type": "string", "maxLength": 2000 },
@@ -184,14 +194,12 @@
         "difficulty": { "type": "string", "enum": ["beginner", "intermediate", "advanced"] },
         "durationMinutes": { "type": "integer" },
         "featured": { "type": "boolean" },
-        "has3dMode": { "type": "boolean" },
-        "threeDSceneType": { "type": "string", "enum": ["trigonometry_triangle", "newton_orbit", "algebra_geometry", "molecule_atom", "ai_custom"] },
         "order": { "type": "integer" },
         "status": { "type": "string", "enum": ["published", "draft"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["lessonId", "classId", "subjectId", "chapterId", "topicId", "category", "title", "titleBn", "youtubeUrl", "difficulty", "order", "status", "createdAt", "updatedAt"]
+      "required": ["lessonId", "classId", "subjectId", "chapterId", "topicId", "category", "title", "titleBn", "difficulty", "order", "status", "createdAt", "updatedAt"]
     },
     "ResourceItem": {
       "title": "ResourceItem",
@@ -218,6 +226,7 @@
         "lessonId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "questions": { "type": "array" },
+        "creativeQuestions": { "type": "array" },
         "status": { "type": "string", "enum": ["published", "draft"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
